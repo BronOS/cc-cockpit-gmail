@@ -38,6 +38,7 @@ const { headerSpec } = require('./lib/header')
 const { STEPS, linkUrl } = require('./lib/setup')
 const { runCli } = require('./lib/cli')
 const { jsonFile } = require('./lib/store')
+const F = require('./lib/feed')
 const { hashOf, sha, oneLine, cut, rowId, mapLimit, gmailId } = require('./lib/util')
 const { esc } = require('./lib/entities')
 const J = require('./lib/jira')
@@ -125,6 +126,7 @@ function start(ctx, io = {}) {
     // `done`: Gmail took it; dropped after the next full poll that started later has read Gmail again.
     marks: new Map(),
     scopePromptHidden: false, // "Not now" on the sign-in-again prompt, for this run
+    jiraKeys: new Map(), // row id -> the issue key of a Jira mail (classifyChanged), for the inbox-feed
     stopped: false,
   }
   const cfg = () => S.settings.cfg
@@ -346,6 +348,7 @@ function start(ctx, io = {}) {
       } finally {
         S.polling = null
         postState()
+        emitChanged()
       }
     })()
     postState()
@@ -407,6 +410,7 @@ function start(ctx, io = {}) {
         ctx.log.warn(`jira hints: ${e && e.message ? e.message : e}`)
         return new Map()
       })
+      S.jiraKeys = new Map([...jiraOf].filter(([, v]) => v.key).map(([id, v]) => [id, v.key]))
       const items = rows.map((r) => triageItem(r, cfg().triageText, me, jiraOf.get(r.id) || null))
       const ids = new Set(items.map((i) => i.id))
       const todo = items.filter((it) => force.has(it.id) || S.sigs[it.id] !== hashOf(it))
@@ -437,6 +441,7 @@ function start(ctx, io = {}) {
       await saveTriage()
       rebuild()
       postState()
+      emitChanged()
     })
     return S.classifying
   }
@@ -939,6 +944,7 @@ function start(ctx, io = {}) {
         }
         rebuild()
         postState()
+        emitChanged()
         const results = await Promise.all(
           ids.map((id) => {
             const call = (perThread.get(id) || Promise.resolve())
@@ -986,6 +992,7 @@ function start(ctx, io = {}) {
         if (failed.length) {
           rebuild()
           postState()
+          emitChanged() // the rolled-back rows are unread again
         }
         return { ok: !failed.length, done: ids.length - failed.length, failed, ...(scope ? { scope } : {}) }
       } catch (e) {
@@ -1197,6 +1204,67 @@ function start(ctx, io = {}) {
       setNotice(e && e.message ? e.message : String(e), 'error')
     }
   })
+
+  // ---- the inbox-feed service (lib/feed.js; Inbox reads it, cc-cockpit 0.9.7+) ----
+
+  /** Tell Inbox the cache changed (a poll, a judgement, a read change). Never throws: an older app has no listener to reach. */
+  function emitChanged() {
+    if (S.stopped) return
+    try {
+      ctx.services.emit('inbox-feed', 'changed', {})
+    } catch (e) {
+      ctx.log.warn('inbox-feed changed:', e && e.message ? e.message : e)
+    }
+  }
+
+  /**
+   * The rows the feed answers from. Signed in: the view as the panel shows it (marks included).
+   * Signed out with a cache left (an expired grant keeps it): the same view built from that cache,
+   * so Inbox can say "signed out, showing the last items" as the contract asks.
+   */
+  function feedRows() {
+    if (signedIn()) return allRows(S.view)
+    if (!S.cache || !S.cache.lists) return []
+    const marks = new Map([...S.marks].map(([id, m]) => [id, m.unread]))
+    return allRows(buildView({ cfg: cfg(), cache: overlayCache(S.cache, marks), verdicts: triageOn() ? S.verdicts : {} }))
+  }
+
+  /** A row id for open / markRead: well-formed and in the rows (Inbox only ever offers what it was given). */
+  function feedRow(id) {
+    const row = F.feedId(id) && feedRows().find((r) => r.id === id)
+    if (!row) throw new Error('gmail: that thread is not in the inbox (refresh?)')
+    return row
+  }
+
+  if (ctx.services && typeof ctx.services.provide === 'function') {
+    ctx.services.provide('inbox-feed', {
+      describe: async () => ({ ...F.DESCRIBE }),
+      features: async () => [...F.FEATURES],
+      async items(arg) {
+        const limit = F.feedLimit(arg)
+        await ready
+        const a = auth ? auth.status() : null
+        const out = { items: F.feedItems(feedRows(), { limit, me: (S.cache && S.cache.account) || '', jiraKeys: S.jiraKeys }), asOf: (S.cache && S.cache.lastPoll) || 0, state: 'ok' }
+        if (!signedIn()) {
+          out.state = 'signedOut'
+          out.message = cut(oneLine(tooOld || (a && (a.signedOutReason || (a.settingsMissing && a.settingsMissing.length ? 'Gmail is not set up in this project.' : ''))) || 'Not signed in to Google.'), 300)
+        } else if (S.error) {
+          out.state = 'error'
+          out.message = cut(oneLine(S.error), 300)
+        }
+        return out
+      },
+      async open(id) {
+        feedRow(id)
+        await openThread(id)
+      },
+      async markRead(id) {
+        feedRow(id)
+        const r = await markRow(id, false)
+        if (r.error) throw new Error(`gmail: ${cut(oneLine(r.error), 300)}`)
+      },
+    })
+  }
 
   // ---- CLI ----
 

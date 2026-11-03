@@ -380,11 +380,17 @@ function fakeCtx(opts = {}) {
         })
       },
       available: (name) => Boolean(services[name]),
-      provide() {},
-      emit() {},
+      provide(name, impl) {
+        ctx.provided[name] = impl
+      },
+      emit(name, event, data) {
+        ctx.emitted.push({ name, event, data: structuredClone(data) })
+      },
       caller: () => undefined,
     },
     handles: {},
+    provided: {}, // services this plugin provides: name -> impl
+    emitted: [], // ctx.services.emit calls
     lastState() {
       return [...ctx.posts].reverse().find((m) => m.type === 'state')
     },

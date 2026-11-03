@@ -260,6 +260,17 @@ talks to Jira itself, and nothing needs setting up in the Gmail plugin.
   When the issue cannot be shown (Jira unreachable, slow past 15 s, busy), the mail shows alone
   with a short note.
 
+## Inbox
+
+Since 0.4.0 the plugin provides the `inbox-feed` service (v1) for the Inbox plugin, which merges
+Chat, Mail and Jira into one list. It answers from the threads the panel already holds, never with a
+Gmail call: your **unread** threads (and alert groups), best first by the plugin's own triage
+(urgent, action, fyi; noise only when nothing else is left), each with the id of its newest message,
+so a new reply brings a thread back in Inbox. Inbox can open a thread (the same as a click on its
+row) and mark it read (the same write as Mark read). Mail from Jira carries its issue key. Nothing
+leaves your machine: the data goes to another plugin of the same project. It works with any
+cc-cockpit that has plugin services; Inbox itself needs 0.9.7.
+
 ## CLI
 
 ```

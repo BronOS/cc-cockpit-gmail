@@ -31,7 +31,8 @@ test('the manifest: id, api, entry points and files exist', () => {
     assert.ok(fs.existsSync(path.join(ROOT, p.icon)))
   }
   assert.deepEqual(manifest.services.uses, { triage: 1, reviewer: 1, jira: 1 })
-  assert.equal(manifest.services.provides, undefined)
+  assert.deepEqual(manifest.services.provides, { 'inbox-feed': 1 })
+  assert.equal(manifest.version, '0.4.0')
   assert.equal(manifest.contributes.cli[0].name, 'gmail')
 })
 
