@@ -1,6 +1,8 @@
 'use strict'
 // Token-to-host safety: the one place the Google access token leaves the plugin (the OAuth
-// endpoints are reached by the app's ctx.oauth, never from here).
+// endpoints are reached by the app's ctx.oauth, never from here). Also the one write: since 0.3.0
+// `setThreadUnread` (threads.modify with the UNREAD label and nothing else) is the only request that
+// is not a GET, and the only one that can change the mailbox (see there).
 //
 // The rule (design "Auth": tokens are sent only to https://gmail.googleapis.com and the OAuth
 // endpoints): every request is built here from a fixed origin and a path, so no address from a
@@ -10,6 +12,8 @@
 
 const ORIGIN = 'https://gmail.googleapis.com'
 const TIMEOUT_MS = 20000
+// What the person reads when Google refuses the write for the scope (the panel's prompt says the same).
+const WRITE_SCOPE_TEXT = 'Sign in again to allow marking mail read: this Google sign-in only lets the plugin read your mail (a sign-in from before version 0.3.0, or the Gmail box was unticked on the consent page).'
 
 /** Why a request failed, as a kind the host and the panel can act on. */
 class GmailError extends Error {
@@ -49,6 +53,46 @@ function isBusy(err) {
  * @returns {Promise<any>} the JSON body
  */
 async function gmailGet(path, o) {
+  return request('GET', path, o, null)
+}
+
+/** The one label the plugin ever changes. */
+const UNREAD = 'UNREAD'
+
+/**
+ * The body of the plugin's only write: exactly `{ removeLabelIds: ['UNREAD'] }` (mark read) or
+ * `{ addLabelIds: ['UNREAD'] }` (mark unread), from a boolean, never from a caller's label list, so
+ * no call path can archive (remove INBOX), label, star, trash or send. Null for anything but a
+ * boolean.
+ */
+function readStateBody(unread) {
+  if (unread === true) return { addLabelIds: [UNREAD] }
+  if (unread === false) return { removeLabelIds: [UNREAD] }
+  return null
+}
+
+/**
+ * Mark a whole thread read (`unread` false) or unread (true): `POST users/me/threads/<id>/modify`
+ * (needs the gmail.modify scope; a sign-in with gmail.readonly gets 403 insufficientPermissions,
+ * kind `scope`). Gmail applies the label change to every message of the thread. The thread id is
+ * checked (it goes into the path) and the body is built here from the boolean (readStateBody): this
+ * is the only function in the plugin that sends anything but a GET.
+ *
+ * @param {string} threadId
+ * @param {boolean} unread
+ * @param {object} o as gmailGet (token, fetch, signal, timeoutMs)
+ * @returns {Promise<any>} Gmail's answer (the thread with its messages' labelIds)
+ */
+async function setThreadUnread(threadId, unread, o) {
+  const id = typeof threadId === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(threadId) ? threadId : null
+  if (!id) throw new GmailError('not a thread id', { kind: 'unsafe' })
+  const body = readStateBody(unread)
+  if (!body) throw new GmailError('mark read or unread takes true or false', { kind: 'unsafe' })
+  return request('POST', `/gmail/v1/users/me/threads/${id}/modify`, { ...o, params: null, maxBytes: 2 * 1024 * 1024 }, JSON.stringify(body))
+}
+
+/** GET (no body) or the one POST (setThreadUnread's body) on the Gmail API with the bearer token. */
+async function request(method, path, o, body) {
   if (typeof path !== 'string' || !path.startsWith('/gmail/v1/') || path.includes('..') || path.includes('//') || /[?#%\s\\]/.test(path)) {
     throw new GmailError('not a Gmail API path: the token is not sent', { kind: 'unsafe' })
   }
@@ -62,7 +106,9 @@ async function gmailGet(path, o) {
   const signal = o.signal ? AbortSignal.any([o.signal, timeout]) : timeout
   let res
   try {
-    res = await o.fetch(url, { method: 'GET', headers: { Authorization: `Bearer ${o.token}`, Accept: 'application/json' }, redirect: 'manual', signal })
+    const headers = { Authorization: `Bearer ${o.token}`, Accept: 'application/json' }
+    if (body !== null) headers['Content-Type'] = 'application/json'
+    res = await o.fetch(url, { method, headers, redirect: 'manual', signal, ...(body !== null ? { body } : {}) })
   } catch (e) {
     if (timeout.aborted) throw new GmailError(`Gmail did not answer within ${Math.round(ms / 1000)} s`, { kind: 'timeout' })
     if (o.signal && o.signal.aborted) throw new GmailError('cancelled', { kind: 'network' })
@@ -84,11 +130,15 @@ async function gmailGet(path, o) {
       throw new GmailError('Gmail answered with something that is not JSON', { kind: 'json', status: res.status })
     }
   }
-  throw statusError(res, text)
+  throw statusError(res, text, method !== 'GET')
 }
 
-/** A GmailError for a status that is not 2xx, with Google's own reason when it gave one. */
-function statusError(res, text) {
+/**
+ * A GmailError for a status that is not 2xx, with Google's own reason when it gave one. `write`: the
+ * request was the mark read / unread call, where a missing scope means a sign-in from before 0.3.0
+ * (gmail.readonly) or a consent with the Gmail box unticked, not a lack of read access.
+ */
+function statusError(res, text, write = false) {
   const status = res.status
   if (status >= 300 && status < 400) return new GmailError(`Gmail answered with a redirect (${status}): not followed, the token stays here. A proxy in the way?`, { kind: 'http', status })
   const g = googleError(text)
@@ -99,6 +149,7 @@ function statusError(res, text) {
     return new GmailError('Gmail is rate limiting the plugin; it polls less often until Gmail answers again', { kind: 'rate', status, ...(Number.isFinite(ra) ? { retryAfter: ra } : {}) })
   }
   if (status === 403 && /insufficientPermissions|ACCESS_TOKEN_SCOPE_INSUFFICIENT/.test(g.reason + ' ' + g.message)) {
+    if (write) return new GmailError(WRITE_SCOPE_TEXT, { kind: 'scope', status, reason: g.reason })
     return new GmailError('Google gave the plugin no read access to Gmail: sign in again and leave "View your email messages and settings" ticked on the consent page', { kind: 'scope', status, reason: g.reason })
   }
   if (status === 403 && /accessNotConfigured|SERVICE_DISABLED/.test(g.reason + ' ' + g.message)) {
@@ -156,4 +207,4 @@ async function readLimited(res, max) {
   return Buffer.concat(chunks, total)
 }
 
-module.exports = { ORIGIN, GmailError, gmailGet, readLimited, isBusy, googleError }
+module.exports = { ORIGIN, GmailError, gmailGet, setThreadUnread, readStateBody, readLimited, isBusy, googleError, UNREAD, WRITE_SCOPE_TEXT }

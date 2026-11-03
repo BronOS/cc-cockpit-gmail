@@ -1,5 +1,6 @@
 'use strict'
-// bronos.gmail: your Gmail in lanes (Unread, Alerts, Read), sorted by jev-triage, read-only.
+// bronos.gmail: your Gmail in lanes (Unread, Alerts, Read), sorted by jev-triage; since 0.3.0 it
+// marks threads read or unread, and changes nothing else in the mailbox.
 // Plain JavaScript with no build step; the pure logic is in ./lib (node:test suites in test/).
 // Design: docs/design.md. The app API: `ccc guide api` (this file uses only what it documents).
 // Built the way bronos.jira is built (its host is the model for this one).
@@ -11,14 +12,18 @@
 // what changed, and the state goes to the panel. Nothing is polled until an OAuth client is set
 // and the person signed in with Google.
 //
-// Read-only: no call here changes the mailbox. Opening a thread does not mark it read in Gmail.
+// Writes (0.3.0, design "Read state"): only the read state, through client.setUnread (the UNREAD
+// label, nothing else; http.setThreadUnread is the plugin's only write), bounded by readstate.js's
+// gate. Mark read / Mark unread on a row, `ccc gmail read|unread`, and opening a thread from the
+// panel while the project setting markReadOnOpen is on (the default).
 
 const path = require('node:path')
 const { readSettings } = require('./lib/settings')
 const { createAuth, AuthError } = require('./lib/auth')
 const { shortClientId } = require('./lib/oauth-client')
 const { createClient } = require('./lib/client')
-const { isBusy } = require('./lib/http')
+const { isBusy, WRITE_SCOPE_TEXT } = require('./lib/http')
+const { createGate, overlayCache, GateStopped } = require('./lib/readstate')
 const { poll, buildView, allRows, loadCache, emptyCache } = require('./lib/poll')
 const { compactMessage } = require('./lib/model')
 const { groupTitle } = require('./lib/alerts')
@@ -33,7 +38,7 @@ const { headerSpec } = require('./lib/header')
 const { STEPS, linkUrl } = require('./lib/setup')
 const { runCli } = require('./lib/cli')
 const { jsonFile } = require('./lib/store')
-const { hashOf, sha, oneLine, cut, rowId, mapLimit } = require('./lib/util')
+const { hashOf, sha, oneLine, cut, rowId, mapLimit, gmailId } = require('./lib/util')
 const { esc } = require('./lib/entities')
 const J = require('./lib/jira')
 const { MAX_TOTAL_CHARS } = require('./lib/images')
@@ -116,6 +121,10 @@ function start(ctx, io = {}) {
     notice: null, // { text, kind: 'info'|'error' } after an action, until dismissed or replaced
     clientError: null, // why the pasted client file was refused (shown by the paste box)
     choose: null, // { id, tabs } when Discuss needs the person to pick a tab
+    // Mark read / unread shown before Gmail answers: thread id -> { unread, done, prev } (readstate.js).
+    // `done`: Gmail took it; dropped after the next full poll that started later has read Gmail again.
+    marks: new Map(),
+    scopePromptHidden: false, // "Not now" on the sign-in-again prompt, for this run
     stopped: false,
   }
   const cfg = () => S.settings.cfg
@@ -166,6 +175,7 @@ function start(ctx, io = {}) {
     S.stats = null
     S.labels = null
     S.backoffMinutes = 0
+    S.marks.clear()
     images = null
     rebuild()
     void saveCache()
@@ -183,7 +193,8 @@ function start(ctx, io = {}) {
   // ---- the view ----
 
   function rebuild() {
-    S.view = S.cache && signedIn() ? buildView({ cfg: cfg(), cache: S.cache, verdicts: triageOn() ? S.verdicts : {} }) : { lanes: [], unread: 0 }
+    const marks = new Map([...S.marks].map(([id, m]) => [id, m.unread]))
+    S.view = S.cache && signedIn() ? buildView({ cfg: cfg(), cache: overlayCache(S.cache, marks), verdicts: triageOn() ? S.verdicts : {} }) : { lanes: [], unread: 0 }
     try {
       ctx.badge(PANEL, S.view.unread || null)
     } catch (e) {
@@ -307,12 +318,17 @@ function start(ctx, io = {}) {
         if (!signedIn()) return
         const gen = S.gen
         const cache = S.cache
+        // Marks Gmail took before this poll started: a full poll reads them back, so they can go.
+        const settled = [...S.marks].filter(([, m]) => m.done)
         const r = await poll({ client: gmail, cfg: cfg(), cache, force, now: now(), signal: abort.signal })
         if (gen !== S.gen) return // signed out or another client meanwhile: not this account's lanes
         S.stats = r.stats
         S.laneErrors = r.laneErrors
         S.error = null
-        if (r.changed) rebuild()
+        let cleared = false
+        // Only a full poll: a "no change" answer did not read the lists again.
+        if (r.full) for (const [id, m] of settled) if (S.marks.get(id) === m) cleared = S.marks.delete(id) || cleared
+        if (r.changed || cleared) rebuild()
         for (const e of r.stats.threadErrors) ctx.log.warn(`reading thread ${e.id} failed: ${e.message}`)
         for (const [lane, m] of Object.entries(r.laneErrors)) ctx.log.warn(`${lane} search: ${m}`)
         await saveCache()
@@ -464,14 +480,30 @@ function start(ctx, io = {}) {
     void (async () => {
       try {
         const r = await auth.signIn()
-        // A new sign-in may be another Google account: nothing of the last one carries over.
-        resetAccount()
-        setNotice(r.sessionOnly ? `Signed in, but only until the app closes: ${r.sessionOnly}. Fix the keychain (ccc guide settings-secrets) and sign in again to stay signed in.` : 'Signed in with Google. Reading your mail…', r.sessionOnly ? 'error' : 'info')
+        // A new sign-in may be another Google account: nothing of the last one carries over. The same
+        // account (signing in again to allow marking mail read, after invalid_grant) keeps its lanes
+        // and verdicts, so nothing is read or judged again for it.
+        const before = S.cache && S.cache.account
+        let same = false
+        if (before) {
+          try {
+            same = (await gmail.profile(abort.signal)).emailAddress === before
+          } catch (e) {
+            ctx.log.warn(`reading the account after the sign-in failed: ${e.message}`)
+          }
+        }
+        if (same) {
+          S.error = null
+          S.scopePromptHidden = false
+          rebuild()
+        } else resetAccount()
+        const again = same && !r.sessionOnly ? `Signed in again as ${before}${auth.status().needsWriteScope ? '.' : ': Mark read and Mark unread work now.'}` : null
+        setNotice(r.sessionOnly ? `Signed in, but only until the app closes: ${r.sessionOnly}. Fix the keychain (ccc guide settings-secrets) and sign in again to stay signed in.` : again || 'Signed in with Google. Reading your mail…', r.sessionOnly ? 'error' : 'info')
         ctx.log.info(`signed in (${from})`)
         await pollNow('signin', true)
         // A poll of the old account was running (its result is thrown away): poll this one now.
         if (S.cache && !S.cache.lastPoll) await pollNow('signin', true)
-        if (S.cache && S.cache.account && !r.sessionOnly) setNotice(`Signed in as ${S.cache.account}.`)
+        if (!same && S.cache && S.cache.account && !r.sessionOnly) setNotice(`Signed in as ${S.cache.account}.`)
       } catch (e) {
         // Replaced by a newer sign-in: that one reports, this one says nothing.
         if (e && e.kind === 'superseded') return
@@ -541,10 +573,13 @@ function start(ctx, io = {}) {
     let url
     let note = ''
     let key
+    let unreadThreads // the threads shown that have an unread message now (markReadOnOpen)
+    const hasUnread = (msgs) => msgs.some((m) => Array.isArray(m.labelIds) && m.labelIds.includes('UNREAD'))
     if (which.thread) {
       const raw = await gmail.thread(which.thread, 'full', signal || abort.signal)
       messages = raw.messages.filter((m) => m && m.id != null)
       if (!messages.length) throw new Error('this thread has no messages')
+      unreadThreads = hasUnread(messages) ? [which.thread] : []
       const facts = messages.map(compactMessage).sort((a, b) => a.at - b.at)
       title = (facts.find((m) => m.subject) || {}).subject || '(no subject)'
       url = gmailUrl(account, which.thread)
@@ -555,6 +590,7 @@ function start(ctx, io = {}) {
       const ids = row.group.threadIds.slice(0, ALERT_THREADS_SHOWN)
       const got = await mapLimit(ids, 4, (tid) => gmail.thread(tid, 'full', signal || abort.signal))
       messages = got.filter((r) => r.ok).flatMap((r) => r.value.messages.filter((m) => m && m.id != null))
+      unreadThreads = ids.filter((tid, i) => got[i].ok && hasUnread(got[i].value.messages || []))
       const bad = got.filter((r) => !r.ok)
       if (!messages.length) throw bad.length ? bad[0].error : new Error('nothing to show: no thread of this alert')
       title = groupTitle(row.group)
@@ -565,7 +601,7 @@ function start(ctx, io = {}) {
     messages.sort((a, b) => Number(a.internalDate || 0) - Number(b.internalDate || 0))
     const lead = [...messages].reverse().map(compactMessage).find((m) => m.address !== account) || compactMessage(messages[messages.length - 1])
     const bodies = await bigBodies(messages, signal)
-    return { title, sender: lead.from || lead.address, messages, url, note, key, bodies, alert: Boolean(which.alert) }
+    return { title, sender: lead.from || lead.address, messages, url, note, key, bodies, alert: Boolean(which.alert), unreadThreads }
   }
 
   /** Text bodies Gmail did not send inline (very long mails): fetched as attachments, capped. */
@@ -668,10 +704,17 @@ function start(ctx, io = {}) {
    * Jira mail: the issue goes beside the mail (annotate's `companion`) when the reviewer's features()
    * says it can; a refused companion call is tried once more with the issue below the mail, as an
    * older reviewer gets it, before text.
-   * Opening never marks the thread read in Gmail (read-only).
+   * With markReadOnOpen on (the default) the opened thread (an alert row: the threads it shows) is
+   * marked read in Gmail meanwhile, as Gmail does; not when the sign-in cannot write (the panel asks
+   * to sign in again instead).
    */
   async function openThread(id) {
     const t = await loadThread(id)
+    if (cfg().markReadOnOpen && canWrite() && t.unreadThreads.length) {
+      void writeReadState(t.unreadThreads, false).then((r) => {
+        if (r.failed && r.failed.length && !r.scope && !S.stopped) setNotice(`Opened, but it could not be marked read in Gmail: ${r.failed[0].message}`, 'error')
+      })
+    }
     // Asked only when it can matter: an html annotate this run, and Jira on.
     const beside = annotateOn() && !S.htmlRejected && jiraOn() && !t.alert ? await reviewerHasCompanion() : false
     const jx = await jiraThread(t, { companion: beside }).catch((e) => {
@@ -680,6 +723,9 @@ function start(ctx, io = {}) {
     })
     let text = readableText({ subject: t.title, messages: t.messages, url: t.url, note: t.note, bodies: t.bodies })
     const docs = {}
+    // A thread of several mails opens at its newest (last) one; a single mail at its top (reviewer
+    // `start`, app 0.9.4; an older reviewer ignores the field).
+    const startAt = Array.isArray(t.messages) && t.messages.length > 1 ? { start: 'end' } : {}
     const view = async (aside = false, withCompanion = false) => {
       const k = `${aside}:${withCompanion}`
       return (docs[k] = docs[k] || (await threadView(t, aside, jx, withCompanion)))
@@ -698,7 +744,7 @@ function start(ctx, io = {}) {
         if (v.companion) {
           try {
             // The mail's column header: "Mail" and "Open in Gmail ↗" (the issue's says Jira).
-            await reviewer.annotate({ ...base, label: 'Mail', urlLabel: 'Gmail', html: v.html, ...(v.aside ? { aside: v.aside } : {}), ...(v.assets.length ? { assets: v.assets } : {}), companion: v.companion })
+            await reviewer.annotate({ ...base, ...startAt, label: 'Mail', urlLabel: 'Gmail', html: v.html, ...(v.aside ? { aside: v.aside } : {}), ...(v.assets.length ? { assets: v.assets } : {}), companion: v.companion })
             return
           } catch (e) {
             if (isMissingAnnotate(e)) noAnnotate()
@@ -709,7 +755,7 @@ function start(ctx, io = {}) {
       if (!S.htmlRejected && !S.annotateMissing) {
         const v = await view(true)
         try {
-          await reviewer.annotate({ ...base, html: v.html, ...(v.aside ? { aside: v.aside } : {}), ...(v.assets.length ? { assets: v.assets } : {}) })
+          await reviewer.annotate({ ...base, ...startAt, html: v.html, ...(v.aside ? { aside: v.aside } : {}), ...(v.assets.length ? { assets: v.assets } : {}) })
           return
         } catch (e) {
           if (isMissingAnnotate(e)) noAnnotate()
@@ -852,6 +898,137 @@ function start(ctx, io = {}) {
     setNotice(had ? `${labelOf(id)}: your correction is gone.` : `${labelOf(id)} had no correction.`)
   }
 
+  // ---- read state (0.3.0: mark read / unread; lib/readstate.js) ----
+
+  const gate = createGate({ now, sleep: io.sleep })
+  const perThread = new Map() // thread id -> its last write: one thread's writes reach Gmail in order
+  const writes = new Set() // running writeReadState calls (deactivate and the suites wait for them)
+
+  /** Whether the sign-in may write (false: a gmail.readonly sign-in; the panel asks to sign in again). */
+  function canWrite() {
+    return Boolean(auth) && !auth.status().needsWriteScope
+  }
+
+  /**
+   * Mark threads read (`unread` false) or unread in Gmail, shown at once: each thread's override
+   * goes into S.marks and the panel gets the moved rows before the calls run (through the gate, one
+   * thread's calls in order). A call that fails takes its override back (to the one before, when an
+   * earlier mark of that thread is still waiting for a poll). Google refusing for the scope marks
+   * the sign-in read-only (auth.scopeMissing) and shows the sign-in-again prompt. Resolves
+   * `{ ok, done, failed: [{ id, message }], scope?, error? }`; never rejects.
+   */
+  function writeReadState(threadIds, unread) {
+    const p = (async () => {
+      try {
+        await ready
+        if (S.stopped) return { ok: false, done: 0, failed: [], error: 'the plugin is stopping' }
+        if (!signedIn()) return { ok: false, done: 0, failed: [], error: auth ? auth.status().signedOutReason || 'Not signed in to Google.' : tooOld }
+        if (!canWrite()) {
+          S.scopePromptHidden = false
+          postState()
+          return { ok: false, done: 0, failed: [], scope: true, error: WRITE_SCOPE_TEXT }
+        }
+        const ids = [...new Set(threadIds.map((x) => gmailId(x)).filter(Boolean))]
+        if (!ids.length) return { ok: true, done: 0, failed: [] }
+        const gen = S.gen
+        const mine = new Map()
+        for (const id of ids) {
+          const m = { unread, done: false, prev: S.marks.get(id) || null }
+          S.marks.set(id, m)
+          mine.set(id, m)
+        }
+        rebuild()
+        postState()
+        const results = await Promise.all(
+          ids.map((id) => {
+            const call = (perThread.get(id) || Promise.resolve())
+              .catch(() => {})
+              .then(() => {
+                if (S.stopped || gen !== S.gen) throw new GateStopped()
+                return gate.run(() => {
+                  // Checked again when its turn comes: never a call on a disposed ctx.
+                  if (S.stopped || gen !== S.gen) throw new GateStopped()
+                  return gmail.setUnread(id, unread, abort.signal)
+                })
+              })
+            perThread.set(id, call)
+            const out = call.then(
+              () => ({ id, ok: true }),
+              (error) => ({ id, ok: false, error }),
+            )
+            void out.then(() => perThread.get(id) === call && perThread.delete(id))
+            return out
+          }),
+        )
+        if (S.stopped || gen !== S.gen) return { ok: false, done: 0, failed: [], error: 'the account changed or the plugin stopped meanwhile' }
+        const failed = []
+        let scope = false
+        for (const r of results) {
+          const m = mine.get(r.id)
+          if (r.ok) {
+            m.done = true
+            continue
+          }
+          const message = r.error && r.error.message ? r.error.message : String(r.error)
+          failed.push({ id: r.id, message })
+          if (r.error && r.error.kind === 'scope') scope = true
+          ctx.log.warn(`marking thread ${r.id} ${unread ? 'unread' : 'read'} failed: ${message}`)
+          // Rolled back, unless a newer press of this thread replaced it meanwhile.
+          if (S.marks.get(r.id) === m) {
+            if (m.prev) S.marks.set(r.id, m.prev)
+            else S.marks.delete(r.id)
+          }
+        }
+        if (scope) {
+          await auth.scopeMissing()
+          S.scopePromptHidden = false
+        }
+        if (failed.length) {
+          rebuild()
+          postState()
+        }
+        return { ok: !failed.length, done: ids.length - failed.length, failed, ...(scope ? { scope } : {}) }
+      } catch (e) {
+        ctx.log.warn(`mark ${unread ? 'unread' : 'read'}: ${e && e.message ? e.message : e}`)
+        return { ok: false, done: 0, failed: [], error: e && e.message ? e.message : String(e) }
+      }
+    })()
+    writes.add(p)
+    void p.then(() => writes.delete(p))
+    return p
+  }
+
+  /**
+   * Mark read / Mark unread on a row (panel) or `ccc gmail read|unread`: a thread, or for read an
+   * alert group (all of its unread threads). Resolves `{ ok, message }` or `{ error, scope? }`.
+   */
+  async function markRow(id, unread) {
+    const which = rowId(id)
+    if (!which) return { error: 'not a thread id' }
+    let threadIds
+    let what
+    if (which.thread) {
+      threadIds = [which.thread]
+      what = labelOf(id) === 'the mail' ? `thread ${which.thread}` : labelOf(id)
+    } else {
+      if (unread) return { error: 'An alert group cannot be marked unread: mark one of its threads unread (its id from ccc gmail show).' }
+      await ready
+      const row = rowOf(id)
+      if (!row || row.kind !== 'alert') return { error: 'that alert is no longer in the Alerts lane (refresh?)' }
+      threadIds = row.group.threadIds
+      what = labelOf(id)
+    }
+    const state = unread ? 'unread' : 'read'
+    const r = await writeReadState(threadIds, unread)
+    if (r.scope) return { error: WRITE_SCOPE_TEXT, scope: true }
+    if (r.error) return { error: r.error }
+    if (r.failed.length) {
+      const n = threadIds.length
+      return { error: `${n > 1 ? `${r.failed.length} of ${n} threads of ${what}` : what} could not be marked ${state} in Gmail: ${r.failed[0].message}. ${n > 1 ? 'Those are' : 'It is'} back where ${n > 1 ? 'they were' : 'it was'}.` }
+    }
+    return { ok: true, message: `Marked ${what}${threadIds.length > 1 ? ` (${threadIds.length} threads)` : ''} ${state} in Gmail.` }
+  }
+
   // ---- panel ----
 
   function stateMessage() {
@@ -884,6 +1061,8 @@ function start(ctx, io = {}) {
       laneErrors: S.laneErrors,
       triage: { on: tOn, error: tOn ? S.triageError : null },
       annotate: annotateOn(),
+      // Mark read / unread: `prompt` = this sign-in only reads, ask to sign in again (until Not now).
+      write: a && a.signedIn ? { allowed: !a.needsWriteScope, prompt: Boolean(a.needsWriteScope) && !S.scopePromptHidden, markReadOnOpen: cfg().markReadOnOpen } : null,
       notice: S.notice,
       choose: S.choose,
       unread: S.view.unread,
@@ -985,6 +1164,9 @@ function start(ctx, io = {}) {
         case 'signOut':
           await signOut()
           return setNotice('Signed out: the stored Google sign-in of this project is deleted.')
+        case 'hideScopePrompt':
+          S.scopePromptHidden = true
+          return postState()
       }
       // The page is ours, but its id still goes into a URL path and a Gmail request: checked.
       const id = typeof m.id === 'string' && rowId(m.id) ? m.id : null
@@ -1002,6 +1184,13 @@ function start(ctx, io = {}) {
           return await wrong(id, m.priority)
         case 'undoWrong':
           return await undoWrong(id)
+        case 'markRead':
+        case 'markUnread': {
+          // The row moved at once; only a failure says anything (the scope one is the prompt).
+          const r = await markRow(id, m.type === 'markUnread')
+          if (r.error && !r.scope) setNotice(r.error, 'error')
+          return
+        }
       }
     } catch (e) {
       ctx.log.warn(`panel ${m.type}: ${e && e.message ? e.message : e}`)
@@ -1036,6 +1225,11 @@ function start(ctx, io = {}) {
           ? `reviewer.annotate, text only (its html mode was refused: ${S.htmlRejected})`
           : 'reviewer.annotate (the thread as clean HTML with its pictures, notes on it)'
         : "the plugin's reader page (no reviewer with annotate in this project)",
+      write: a.signedIn
+        ? a.needsWriteScope
+          ? 'off: this sign-in only reads (from before version 0.3.0, or the Gmail box was unticked). Sign in again to allow marking mail read: ccc gmail login'
+          : `mark read / unread on; opening a thread from the panel ${cfg().markReadOnOpen ? 'marks it read' : 'leaves it unread (markReadOnOpen off)'}`
+        : null,
       jira: jiraOn() ? 'on (bronos.jira): Jira mail gets hints, and the issue shows beside the mail (below it with a reviewer older than cc-cockpit 0.9.3)' : 'off: enable the Jira plugin (bronos.jira) in this project for Jira mail hints and the issue beside the mail',
       error: S.error,
       laneErrors: S.laneErrors,
@@ -1065,6 +1259,16 @@ function start(ctx, io = {}) {
           const t = await loadThread(id, signal)
           return readableText({ subject: t.title, messages: t.messages, url: t.url, note: t.note, bodies: t.bodies })
         },
+        // Bounded like refresh: a full write window (readstate.js) could make a call wait past `ccc`'s 30 s.
+        async mark(id, unread) {
+          let timer
+          const late = new Promise((r) => {
+            timer = setTimeout(() => r({ pending: true }), io.cliWaitMs || CLI_WAIT_MS)
+          })
+          const got = await Promise.race([markRow(id, unread), late])
+          clearTimeout(timer)
+          return got
+        },
         login: async () => startSignIn('cli'),
         logout: () => signOut(),
         client: (text) => pasteClient(text),
@@ -1079,8 +1283,10 @@ function start(ctx, io = {}) {
     ready,
     pollNow,
     classifyChanged,
+    writesIdle: () => Promise.all([...writes]),
     stop() {
       S.stopped = true
+      gate.stop()
       abort.abort()
       if (headerTimer) (io.clearInterval || clearInterval)(headerTimer)
       if (firstPoll) (io.clearTimeout || clearTimeout)(firstPoll)

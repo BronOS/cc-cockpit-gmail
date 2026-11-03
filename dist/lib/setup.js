@@ -24,7 +24,7 @@ const STEPS = [
     text: 'Set up the consent screen (Google Auth Platform > Get started): an app name and your address. Audience: for a personal Gmail account choose External, then Publish app so it is "In production" (in Testing Google ends your sign-in every 7 days). For a Google Workspace (work) account choose Internal.',
     links: [{ id: 'branding', label: 'Branding' }, { id: 'audience', label: 'Audience' }],
   },
-  { text: 'Data access: add the scope .../auth/gmail.readonly (Gmail API, read only). Nothing else is needed: the plugin never changes your mailbox.', links: [{ id: 'scopes', label: 'Data access' }] },
+  { text: 'Data access: add the scope .../auth/gmail.modify (Gmail API; Google calls it "restricted": with Internal there is no verification, with External in production Google shows its unverified-app screen once). The plugin uses it to mark mail read or unread only: it never archives, labels, trashes or sends. Nothing else is needed.', links: [{ id: 'scopes', label: 'Data access' }] },
   { text: 'Clients > Create client: application type "Desktop app", any name. Download the JSON file Google offers.', links: [{ id: 'clients', label: 'Create client' }] },
   {
     text: 'Paste the whole file below and press Save client (or run `ccc gmail client <file>`), then Sign in with Google. For a personal account Google warns once that it has not verified the app: it is your own app, so choose Advanced > Go to <app name>.',

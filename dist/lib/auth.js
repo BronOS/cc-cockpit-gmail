@@ -27,13 +27,22 @@
 //   after 7 days), so the message says that and how to fix it.
 // - Changing the client (another id in the settings, a pasted file of another client, removing the
 //   pasted one) signs out: the old client's refresh token is deleted.
+// - The granted scope (0.3.0: gmail.modify, for mark read / unread). A sign-in from 0.1.0 / 0.2.0
+//   holds gmail.readonly: its refresh token keeps reading (a refresh sends no scope, the grant keeps
+//   its own), so nothing breaks, but a write gets 403 insufficientPermissions. `A.scope` is 'modify',
+//   'readonly' or null (not known), kept in the `signedIn` storage marker next to the client's hash:
+//   a 0.2.0 marker has no `scope`, which is how an old sign-in is told without a request. A sign-in
+//   by 0.3.0 asked for gmail.modify, so it is taken as 'modify' unless the token response's `scope`
+//   says otherwise (cc-cockpit's ctx.oauth passes none as of 0.9.3; read when it does) or the first
+//   write is refused for the scope (`scopeMissing`, called by the host). 'readonly' makes the panel
+//   ask to sign in again; reading goes on.
 //
 // Nothing here logs or returns a token or a secret: errors carry Google's error code at most (the
 // app's own `ctx.oauth` messages do the same, `the token endpoint refused the request: HTTP 400
 // (invalid_grant)`).
 
 const crypto = require('node:crypto')
-const { oauthSpec, parseClientFile, shortClientId } = require('./oauth-client')
+const { oauthSpec, parseClientFile, shortClientId, grantedScope } = require('./oauth-client')
 const { sha } = require('./util')
 
 const EARLY_MS = 60000 // refresh this long before the access token expires (clock skew, a slow call)
@@ -93,6 +102,7 @@ function createAuth(o) {
     signedOutReason: null, // shown in the panel after invalid_grant
     signingIn: false,
     signInGen: 0,
+    scope: null, // 'modify' | 'readonly' | null (not known): what the current sign-in may do
   }
 
   /** The client in use: the pasted one, else the settings one, else null. */
@@ -147,10 +157,11 @@ function createAuth(o) {
     // Signed in before, and the refresh token is gone: the plugin was uninstalled (or the keychain was
     // reset). Say so instead of looking like a first setup.
     const c = client()
-    if (c && !A.hasRefresh && !A.signedOutReason) {
-      const mark = await o.storage.get('signedIn').catch(() => undefined)
-      if (mark && mark.client === sha(c.clientId, 12)) A.signedOutReason = GONE_TEXT
-    }
+    const mark = c ? await o.storage.get('signedIn').catch(() => undefined) : undefined
+    const ours = Boolean(mark && c && mark.client === sha(c.clientId, 12))
+    if (c && !A.hasRefresh && !A.signedOutReason && ours) A.signedOutReason = GONE_TEXT
+    // A marker without `scope` was written by 0.1.0 / 0.2.0, whose sign-in asked for gmail.readonly.
+    if (A.hasRefresh && ours) A.scope = mark.scope === 'modify' ? 'modify' : 'readonly'
   }
 
   function applySettings(cfg) {
@@ -180,6 +191,7 @@ function createAuth(o) {
   async function dropSignIn(clientId) {
     A.access = null
     A.hasRefresh = false
+    A.scope = null
     await o.storage.delete('signedIn').catch(() => {})
     if (clientId && A.projectKey) await o.secrets.delete(refreshKey(A.projectKey, clientId)).catch((e) => o.log.warn(`deleting the stored sign-in failed: ${e.message}`))
   }
@@ -281,13 +293,15 @@ function createAuth(o) {
     if (!still || still.clientId !== c.clientId) throw new AuthError('The OAuth client changed during the sign-in: sign in again.', 'oauth')
     A.access = { token: tokens.accessToken, expiresAt: tokens.expiresAt }
     A.signedOutReason = null
+    // Asked for gmail.modify: granted unless the token response says otherwise (or a write tells).
+    A.scope = grantedScope(tokens.scope) || 'modify'
     let sessionOnly = false
     if (tokens.refreshToken) {
       try {
         await ensureProjectKey()
         await o.secrets.set(refreshKey(A.projectKey, c.clientId), tokens.refreshToken)
         A.hasRefresh = true
-        await o.storage.set('signedIn', { client: sha(c.clientId, 12) }).catch(() => {})
+        await o.storage.set('signedIn', { client: sha(c.clientId, 12), scope: A.scope }).catch(() => {})
       } catch (e) {
         // The keyring is locked or missing: no file fallback (by design); signed in for now.
         o.log.warn(`storing the sign-in failed, signed in until the access token expires: ${e.message}`)
@@ -345,6 +359,9 @@ function createAuth(o) {
       if (t.refreshToken && t.refreshToken !== rt) await o.secrets.set(refreshKey(A.projectKey, c.clientId), t.refreshToken).catch((e) => o.log.warn(`storing the new refresh token failed: ${e.message}`))
       A.access = { token: t.accessToken, expiresAt: t.expiresAt }
       A.hasRefresh = true
+      // Should the app ever pass the token response's scope, it is the surest answer.
+      const g = grantedScope(t.scope)
+      if (g && g !== A.scope) await setScope(g)
       return t.accessToken
     })()
     try {
@@ -352,6 +369,21 @@ function createAuth(o) {
     } finally {
       A.refreshing = null
     }
+  }
+
+  /** Keep what the sign-in may do, in memory and in the storage marker (when there is a stored sign-in). */
+  async function setScope(scope) {
+    A.scope = scope
+    const c = client()
+    if (!c || !A.hasRefresh) return
+    await o.storage.set('signedIn', { client: sha(c.clientId, 12), scope }).catch((e) => o.log.warn(`keeping the sign-in's scope failed: ${e.message}`))
+  }
+
+  /** Google refused a write for the scope: this sign-in only reads until the person signs in again. */
+  function scopeMissing() {
+    if (A.scope === 'readonly') return Promise.resolve()
+    o.log.warn('Google refused marking mail read for the scope (a gmail.readonly sign-in): asking to sign in again')
+    return setScope('readonly')
   }
 
   /** After a 401 from Gmail: the access token is no good, the next `token()` refreshes. */
@@ -371,10 +403,12 @@ function createAuth(o) {
       sessionOnly: Boolean(c) && !A.hasRefresh && Boolean(A.access && A.access.expiresAt > now()),
       signingIn: A.signingIn,
       signedOutReason: A.signedOutReason,
+      // Signed in, but only with gmail.readonly: the panel asks to sign in again before a write.
+      needsWriteScope: Boolean(c) && A.scope === 'readonly' && (A.hasRefresh || Boolean(A.access && A.access.expiresAt > now())),
     }
   }
 
-  return { A, load, client, settingsChanged, pasteClient, removeClient, signIn, signOut, token, invalidate, status, ensureProjectKey }
+  return { A, load, client, settingsChanged, pasteClient, removeClient, signIn, signOut, token, invalidate, status, ensureProjectKey, scopeMissing }
 }
 
 module.exports = { createAuth, AuthError, isInvalidGrant, refreshKey, clientKey, INVALID_GRANT_TEXT, GONE_TEXT, EARLY_MS }

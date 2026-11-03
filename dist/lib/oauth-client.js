@@ -11,8 +11,25 @@
 // out) would get none. `ctx.oauth` adds response_type, client_id, redirect_uri, state, PKCE and scope.
 const AUTH_URL = 'https://accounts.google.com/o/oauth2/v2/auth?access_type=offline&prompt=consent'
 const TOKEN_URL = 'https://oauth2.googleapis.com/token'
-// Read-only on purpose (design "Left out of v1": writing needs gmail.modify).
-const SCOPE = 'https://www.googleapis.com/auth/gmail.readonly'
+// gmail.modify since 0.3.0 (mark read / unread: threads.modify with the UNREAD label needs it; it
+// includes reading). Google files it as "restricted" like gmail.readonly, so nothing changes for the
+// person's own client but the scope ticked on the Data access page. The plugin uses it for the
+// UNREAD label only (http.setThreadUnread is its one write). A sign-in from 0.1.0 / 0.2.0 holds
+// gmail.readonly: it still reads, and the panel asks to sign in again before a write (auth.js).
+const SCOPE = 'https://www.googleapis.com/auth/gmail.modify'
+const READONLY_SCOPE = 'https://www.googleapis.com/auth/gmail.readonly'
+// Scopes that allow threads.modify (the full-mailbox scope too, should a token response list it).
+const WRITE_SCOPES = new Set([SCOPE, 'https://mail.google.com/'])
+
+/**
+ * What a token response's `scope` (space-separated, RFC 6749 §5.1) says about writing: 'modify' when
+ * it grants threads.modify, 'readonly' when it does not, null when there is no such field (cc-cockpit's
+ * ctx.oauth returns none as of 0.9.3: then the first write tells, by a 403 insufficientPermissions).
+ */
+function grantedScope(scope) {
+  if (typeof scope !== 'string' || !scope.trim()) return null
+  return scope.trim().split(/\s+/).some((s) => WRITE_SCOPES.has(s)) ? 'modify' : 'readonly'
+}
 
 // What Google writes into a downloaded client file (both spellings of each are in use: the v1
 // auth URI is what the console writes today, gws and older files have the others).
@@ -85,4 +102,4 @@ function shortClientId(id) {
   return head.length > 14 ? `${head.slice(0, 12)}…` : head
 }
 
-module.exports = { AUTH_URL, TOKEN_URL, SCOPE, CLIENT_SUFFIX, MAX_FILE, checkClientId, checkClientSecret, parseClientFile, oauthSpec, shortClientId }
+module.exports = { AUTH_URL, TOKEN_URL, SCOPE, READONLY_SCOPE, grantedScope, CLIENT_SUFFIX, MAX_FILE, checkClientId, checkClientSecret, parseClientFile, oauthSpec, shortClientId }

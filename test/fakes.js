@@ -38,9 +38,9 @@ function picture(type = 'png', size = 64) {
   return Buffer.concat([head, Buffer.alloc(Math.max(0, size - head.length), 7)])
 }
 
-/** A token registry the fake OAuth hands out and the fake Gmail accepts. */
+/** A token registry the fake OAuth hands out and the fake Gmail accepts (`readonly`: tokens of a gmail.readonly grant). */
 function tokens() {
-  return { valid: new Set(), n: 0 }
+  return { valid: new Set(), readonly: new Set(), n: 0 }
 }
 
 /**
@@ -49,19 +49,23 @@ function tokens() {
  * id -> a format=full thread (default: the fixtures). `historyId`: the mailbox's current one;
  * `changedSince(start)` says whether history has records (default: start !== historyId);
  * `historyTooOld`: history answers 404. `fail`: { [route]: status } for `profile`, `list:<lane>`,
- * `thread:<id>`, `history`. `attachments`: `<messageId>` -> bytes (any attachment id of that message).
+ * `thread:<id>`, `history`, `modify:<id>`. `attachments`: `<messageId>` -> bytes (any attachment id of that message).
+ * threads.modify (0.3.0) applies the label change to every message of the thread, moves the thread
+ * between the Unread and Read lists, bumps the history id and records `{ id, body }` in
+ * `state.modifies`; a token of a readonly grant gets Google's 403 insufficientPermissions.
+ * `modifyGate`: a promise each modify waits for (to see the panel before Gmail answers).
  */
 function fakeGmail(opts = {}) {
   const calls = []
   const reg = opts.tokens || tokens()
-  const state = { historyId: opts.historyId || '1000', lists: opts.lists || { unread: [T.t1, T.t2, T.c1], alerts: [T.a1, T.a2, T.a3], read: [T.t3] } }
+  const state = { historyId: opts.historyId || '1000', lists: opts.lists || { unread: [T.t1, T.t2, T.c1], alerts: [T.a1, T.a2, T.a3], read: [T.t3] }, modifies: [], modifyGate: opts.modifyGate || null }
   const threads = opts.threads || Object.fromEntries(Object.entries({ t1: T.t1, t2: T.t2, t3: T.t3, a1: T.a1, a2: T.a2, a3: T.a3, c1: T.c1 }).map(([k, id]) => [id, fixture(`thread-${k}.json`)]))
   const failOf = (route) => (opts.fail && opts.fail[route]) || 0
   const errorBody = (status) => (status === 401 ? fixture('error-401.json') : status === 429 ? fixture('error-429.json') : status === 403 ? fixture('error-403-scope.json') : { error: { code: status, message: 'boom' } })
   async function fetch(url, init = {}) {
     const headers = init.headers || {}
     const u = new URL(url)
-    calls.push({ url, path: u.pathname, auth: headers.Authorization, redirect: init.redirect, q: u.searchParams.get('q') })
+    calls.push({ url, path: u.pathname, method: init.method || 'GET', body: init.body, auth: headers.Authorization, redirect: init.redirect, q: u.searchParams.get('q') })
     if (opts.routes) {
       const r = await opts.routes(u, init)
       if (r) return r
@@ -93,6 +97,34 @@ function fakeGmail(opts = {}) {
       const next = start + max < ids.length ? String(start + max) : undefined
       return json({ threads: page.map((id) => ({ id, snippet: '', historyId: threads[id] ? threads[id].historyId : '1' })), resultSizeEstimate: ids.length, ...(next ? { nextPageToken: next } : {}) })
     }
+    const mm = /^\/threads\/([A-Za-z0-9_-]+)\/modify$/.exec(p)
+    if (mm) {
+      if (init.method !== 'POST') return json({ error: { code: 405, message: 'POST only' } }, 405)
+      if (reg.readonly.has(token)) return json(fixture('error-403-scope.json'), 403)
+      if (state.modifyGate) await state.modifyGate
+      if (failOf(`modify:${mm[1]}`)) return json(errorBody(failOf(`modify:${mm[1]}`)), failOf(`modify:${mm[1]}`))
+      const t = threads[mm[1]]
+      if (!t) return json({ error: { code: 404, message: 'Requested entity was not found.' } }, 404)
+      const body = JSON.parse(init.body)
+      state.modifies.push({ id: mm[1], body })
+      const add = body.addLabelIds || []
+      const remove = body.removeLabelIds || []
+      state.historyId = String(Number(state.historyId) + 1)
+      t.historyId = state.historyId
+      for (const m of t.messages) m.labelIds = [...new Set([...(m.labelIds || []).filter((l) => !remove.includes(l)), ...add])]
+      const unread = t.messages.some((m) => m.labelIds.includes('UNREAD'))
+      const drop = (lane) => (state.lists[lane] = (state.lists[lane] || []).filter((x) => x !== t.id))
+      if (unread) {
+        if ((state.lists.read || []).includes(t.id)) (drop('read'), state.lists.unread.unshift(t.id))
+      } else {
+        const wasAlert = (state.lists.alerts || []).includes(t.id)
+        const wasUnread = (state.lists.unread || []).includes(t.id)
+        drop('alerts')
+        drop('unread')
+        if (wasUnread && !wasAlert) state.lists.read.unshift(t.id)
+      }
+      return json({ id: t.id, messages: t.messages.map((m) => ({ id: m.id, threadId: t.id, labelIds: m.labelIds })) })
+    }
     const tm = /^\/threads\/([A-Za-z0-9_-]+)$/.exec(p)
     if (tm) {
       if (failOf(`thread:${tm[1]}`)) return json(errorBody(failOf(`thread:${tm[1]}`)), failOf(`thread:${tm[1]}`))
@@ -122,19 +154,28 @@ function fakeGmail(opts = {}) {
  * A fake ctx.oauth. `authorize` and `refresh` record their specs and hand out tokens the fake
  * Gmail accepts. `invalidGrant: true` makes refresh fail the way the app's ctx.oauth does.
  * `noRefreshToken`: authorize sends none. `authorizeError`: authorize rejects with it.
+ * `readonly` (settable later as `o.readonly`): the grant is gmail.readonly (a sign-in from 0.2.0,
+ * or the Gmail box unticked): its tokens read but get 403 on a write. `scopeField`: authorize and
+ * refresh return the token response's `scope` (cc-cockpit's ctx.oauth does not, as of 0.9.3).
  */
 function fakeOAuth(reg, opts = {}) {
   const o = {
     authorizes: [],
     refreshes: [],
     invalidGrant: Boolean(opts.invalidGrant),
+    readonly: Boolean(opts.readonly),
+    scopeField: opts.scopeField || null,
+    grants: new Map(), // refresh token -> readonly (a refresh keeps its grant's scope, as Google's)
     async authorize(spec) {
       o.authorizes.push(structuredClone(spec))
       if (o.authorizeError) throw new Error(o.authorizeError)
       if (o.gate) await o.gate
       const t = `ya29.access-${++reg.n}`
       reg.valid.add(t)
-      return { accessToken: t, refreshToken: opts.noRefreshToken ? null : `1//refresh-${reg.n}`, expiresAt: (opts.now || (() => NOW))() + 3600000 }
+      if (o.readonly) reg.readonly.add(t)
+      const rt = opts.noRefreshToken ? null : `1//refresh-${reg.n}`
+      if (rt) o.grants.set(rt, o.readonly)
+      return { accessToken: t, refreshToken: rt, expiresAt: (opts.now || (() => NOW))() + 3600000, ...(o.scopeField ? { scope: o.scopeField } : {}) }
     },
     async refresh(spec, refreshToken) {
       o.refreshes.push({ spec: structuredClone(spec), refreshToken })
@@ -142,6 +183,7 @@ function fakeOAuth(reg, opts = {}) {
       if (o.refreshError) throw new Error(o.refreshError)
       const t = `ya29.access-${++reg.n}`
       reg.valid.add(t)
+      if (o.grants.has(refreshToken) ? o.grants.get(refreshToken) : o.readonly) reg.readonly.add(t)
       return { accessToken: t, refreshToken: o.rotate ? `1//rotated-${reg.n}` : null, expiresAt: (opts.now || (() => NOW))() + 3600000 }
     },
   }

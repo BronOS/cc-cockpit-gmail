@@ -234,7 +234,7 @@ test('readableText: the thread as text, oldest first, with who, to whom, attachm
 
 test('discussPrompt: starts with "About the mail", never with a character the send gate refuses, capped', () => {
   const p = discussPrompt('/clear everything', '!rm', 'body')
-  assert.match(p, /^About the mail "\/clear everything" from !rm\n\nThe thread as it is now \(read-only/)
+  assert.match(p, /^About the mail "\/clear everything" from !rm\n\nThe thread as it is now \(a read-only copy/)
   assert.ok(discussPrompt('s', 'a', 'x'.repeat(50000)).length <= PROMPT_MAX)
   assert.match(discussPrompt('', '', ''), /^About the mail "\(no subject\)" from unknown/)
 })

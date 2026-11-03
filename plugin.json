@@ -1,10 +1,10 @@
 {
   "id": "bronos.gmail",
   "name": "Gmail",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "api": 1,
   "main": "dist/host.js",
-  "description": "Your Gmail in lanes (Unread, Alerts, Read), Grafana alerts grouped, sorted by Jev triage, a thread opened as a clean page to discuss with Claude, Jira mail with its issue (with bronos.jira). Read-only: it never changes your mailbox.",
+  "description": "Your Gmail in lanes (Unread, Alerts, Read), Grafana alerts grouped, sorted by Jev triage, a thread opened as a clean page to discuss with Claude, Jira mail with its issue (with bronos.jira), mark read / unread. It only ever changes the read state: it never archives, labels, trashes or sends.",
   "author": "Oleg Bronzov",
   "license": "MIT",
   "contributes": {
@@ -102,6 +102,12 @@
             "maximum": 1440,
             "default": 2
           },
+          "markReadOnOpen": {
+            "type": "boolean",
+            "title": "Opening a thread marks it read",
+            "description": "Opening a thread from the panel marks it read in Gmail, as Gmail does (an alert row: the threads it shows). Off: it stays unread until you press Mark read.",
+            "default": true
+          },
           "triageText": {
             "type": "string",
             "title": "What triage reads",
@@ -118,8 +124,8 @@
     "cli": [
       {
         "name": "gmail",
-        "summary": "Gmail (read-only): status, refresh, list the lanes, show a thread, sign in or out, set the OAuth client",
-        "usage": "gmail status | refresh | list [lane] | show <threadId> | login | logout | client <file.json> | help"
+        "summary": "Gmail: status, refresh, list the lanes, show a thread, mark it read or unread, sign in or out, set the OAuth client",
+        "usage": "gmail status | refresh | list [lane] | show <threadId> | read <threadId> | unread <threadId> | login | logout | client <file.json> | help"
       }
     ]
   },

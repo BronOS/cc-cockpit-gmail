@@ -1,7 +1,7 @@
 'use strict'
 // Lanes (design "Lanes"): Unread, Alerts (only with alert senders), Read. Inside a lane: triage
-// priority, then the newest message. Unread is Gmail's own UNREAD label: the plugin never changes
-// it and keeps no seen state of its own.
+// priority, then the newest message. Unread is Gmail's own UNREAD label, which the plugin changes
+// only on Mark read / Mark unread or an open with markReadOnOpen (0.3.0); it keeps no seen state of its own.
 
 const LANES = [
   { id: 'unread', title: 'Unread' },

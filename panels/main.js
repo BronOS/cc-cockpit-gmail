@@ -64,11 +64,29 @@ function renderNotices() {
     box.append(n)
   }
   if (!state.auth || !state.auth.signedIn) return
+  if (state.write && state.write.prompt) box.append(scopePrompt())
   if (state.error) box.append(notice(state.error))
   for (const [lane, msg] of Object.entries(state.laneErrors || {})) box.append(notice(`${lane}: ${msg}`))
   for (const p of state.problems || []) box.append(notice(p, 'info'))
   if (!state.triage.on) box.append(notice('Triage is off: the lanes are not sorted. Install and enable Jev triage (bronos.jev-triage) in this project.', 'info'))
   else if (state.triage.error) box.append(notice(`Triage: ${state.triage.error}`))
+}
+
+/**
+ * A sign-in that only reads (from before 0.3.0, or the Gmail box unticked at Google): reading goes on;
+ * this asks to sign in again so Mark read works. "Not now" hides it for this run (a Mark read press
+ * shows it again).
+ */
+function scopePrompt() {
+  const row = el('div', { class: 'tabs' })
+  if (state.auth.signingIn) {
+    row.append(el('span', { class: 'muted', text: 'Waiting for the browser…' }))
+    row.append(button('Start over', () => post('signIn'), 'Cancels the open sign-in and opens a new one in your browser', 'link'))
+  } else {
+    row.append(button('Sign in again', () => post('signIn'), 'Opens the Google sign-in in your browser; leave the Gmail box ticked', 'primary'))
+    row.append(button('Not now', () => post('hideScopePrompt'), 'Hide this until a Mark read press'))
+  }
+  return notice('Sign in again to allow marking mail read. This sign-in only lets the plugin read your mail (it is from before version 0.3.0, or the Gmail box was unticked on Google\'s consent page); reading goes on as before. Your Google Cloud client needs the scope .../auth/gmail.modify on its Data access page (README, "Set up Google Cloud", step 4).', 'info', row)
 }
 
 /** The setup guide: what is missing, the steps with their console links, the paste box, Sign in. */
@@ -93,7 +111,7 @@ function renderSetup() {
     if (a.pasted) row.append(button('Remove pasted client', () => post('removeClient'), 'Forget the pasted client file (the settings fields are used again)', 'link'))
     c.append(row)
     if (a.signingIn) {
-      c.append(el('div', { class: 'muted', text: 'Finish the sign-in in your browser. Google asks to let the app read your mail; the plugin never changes anything.' }))
+      c.append(el('div', { class: 'muted', text: 'Finish the sign-in in your browser. Google asks to let the app "read, compose and send" your mail (its words for the gmail.modify scope); the plugin only marks mail read or unread, and never archives, labels, trashes or sends.' }))
       // The usual dead end: the project is External and in Testing, and this account is not a test user.
       const hint = el('div', { class: 'muted hint', text: 'Google says "Access blocked" or "has not completed the Google verification process"? Add this Google account as a test user on the Audience page (or, for a Workspace account, set the user type to Internal), then Start over. ' })
       hint.append(button('Audience ↗', () => post('link', { id: 'audience' }), 'Opens the Google Cloud console in your browser', 'link'))
@@ -139,7 +157,7 @@ function dot(verdict) {
 
 function rowActions(r) {
   const a = el('div', { class: 'actions' })
-  for (const b of rowButtons(r, { triageOn: state.triage.on })) {
+  for (const b of rowButtons(r, { triageOn: state.triage.on, write: Boolean(state.write) })) {
     const onclick = b.action === 'wrong' ? () => { wrongOpen = wrongOpen === r.id ? null : r.id; render() } : () => post(b.action, { id: r.id })
     const n = button(b.label, onclick, b.title)
     n.dataset.action = b.action
@@ -246,7 +264,9 @@ function renderFooter() {
   const f = $('footer')
   f.replaceChildren()
   if (state.tooOld || !state.auth || !state.auth.signedIn) return
-  f.append(el('span', { text: `Read-only: nothing is marked read or changed in Gmail. ${state.account ? `Signed in as ${state.account}` : 'Signed in'}${state.auth.sessionOnly ? ' (until the app closes)' : ''}. ` }))
+  const w = state.write
+  const writes = !w || !w.allowed ? 'Read-only for now (sign in again to mark mail read).' : w.markReadOnOpen ? 'Opening a thread marks it read in Gmail.' : 'Opening a thread leaves it unread (markReadOnOpen is off).'
+  f.append(el('span', { text: `${writes} The plugin changes only the read state: it never archives, labels, trashes or sends. ${state.account ? `Signed in as ${state.account}` : 'Signed in'}${state.auth.sessionOnly ? ' (until the app closes)' : ''}. ` }))
   f.append(button('Sign out', () => post('signOut'), 'Deletes the stored Google sign-in of this project', 'link'))
 }
 

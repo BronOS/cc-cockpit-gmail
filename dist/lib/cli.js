@@ -11,25 +11,28 @@ const { LANES, LANE_IDS } = require('./lanes')
 const { MAX_FILE } = require('./oauth-client')
 const { groupTitle } = require('./alerts')
 
-const HELP = `ccc gmail: your Gmail, read-only (bronos.gmail)
+const HELP = `ccc gmail: your Gmail (bronos.gmail)
 
   ccc gmail status            client, account, last poll, counts per lane, errors
   ccc gmail refresh           poll Gmail now and print the counts
   ccc gmail list [lane]       the threads of every lane, or of one: ${LANE_IDS.join(', ')}
   ccc gmail show <id>         a thread as readable text (an id from list; alert:<name> for an alert group)
+  ccc gmail read <id>         mark a thread read in Gmail (alert:<name>: all of the alert's unread threads)
+  ccc gmail unread <id>       mark a thread unread in Gmail
   ccc gmail login             start the Google sign-in (your browser does the rest)
   ccc gmail logout            sign out: the stored sign-in is deleted
   ccc gmail client <file>     use the OAuth client file you downloaded from Google Cloud (Desktop app)
   ccc gmail help              this text
 
-The plugin never changes your mailbox: nothing is marked read, archived or sent.
+The plugin changes only whether a thread is read (Gmail's UNREAD label): it never archives,
+labels, trashes or sends. Opening a thread in the panel marks it read (setting markReadOnOpen).
 Settings: ccc plugin config bronos.gmail (the client secret only in Settings > This project).
 `
 
 /**
  * @param {string[]} argv
  * @param {object} deps from the host: status(), refresh(signal), view(), show(id, signal),
- *   login(), logout(), client(text)
+ *   mark(id, unread, signal), login(), logout(), client(text)
  * @param {{ cwd?: string, signal?: AbortSignal }} [call]
  */
 async function runCli(argv, deps, call = {}) {
@@ -64,6 +67,20 @@ async function runCli(argv, deps, call = {}) {
         const st = deps.status()
         if (!st.signedIn) return fail(notReady(st))
         return ok(await deps.show(raw, call.signal))
+      }
+      case 'read':
+      case 'unread': {
+        if (!rest.length) return fail(`usage: ccc gmail ${cmd} <threadId>`, 2)
+        const raw = rest.join(' ')
+        const which = rowId(raw)
+        if (!which) return fail(`not a thread id: "${cut(raw, 60)}" (ccc gmail list shows them)`, 2)
+        if (which.alert && cmd === 'unread') return fail('an alert group cannot be marked unread: use one of its thread ids', 2)
+        const st = deps.status()
+        if (!st.signedIn) return fail(notReady(st))
+        const r = await deps.mark(raw, cmd === 'unread', call.signal)
+        if (r && r.pending) return ok('still waiting for Gmail; ccc gmail list shows the result')
+        if (!r || r.error) return fail(r ? r.error : 'no answer')
+        return ok(r.message)
       }
       case 'login': {
         const r = await deps.login()
@@ -131,6 +148,7 @@ function statusText(st, now = Date.now()) {
   lines.push(`lanes     ${countsLine(st)}`)
   lines.push(`triage    ${st.triage}`)
   lines.push(`view      ${st.annotate}`)
+  if (st.write) lines.push(`write     ${st.write}`)
   if (st.jira) lines.push(`jira      ${st.jira}`)
   for (const p of st.problems || []) lines.push(`problem   ${p}`)
   if (st.error) lines.push(`error     ${st.error}`)

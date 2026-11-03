@@ -132,7 +132,7 @@ test('signed in, then uninstalled: the client stays and the panel says why the s
   await a.auth.load(cfg())
   await a.auth.pasteClient(FILE)
   await a.auth.signIn()
-  assert.deepEqual(await a.storage.get('signedIn'), { client: sha(CLIENT_ID, 12) })
+  assert.deepEqual(await a.storage.get('signedIn'), { client: sha(CLIENT_ID, 12), scope: 'modify' })
   const b = make({ secrets: fakeSecrets(), storage: a.storage })
   await b.auth.load(cfg())
   const st = b.auth.status()
@@ -156,7 +156,7 @@ test('sign in: the spec, the refresh token stored, the access token kept in memo
   assert.equal(await secrets.get(refreshKey(auth.A.projectKey, CLIENT_ID)), '1//refresh-1')
   assert.equal(await auth.token(), 'ya29.access-1')
   assert.equal(oauth.refreshes.length, 0)
-  assert.deepEqual(auth.status(), { client: { source: 'pasted', id: '123456789012…', fullId: CLIENT_ID }, pasted: true, pastedBroken: null, settingsMissing: [], signedIn: true, sessionOnly: false, signingIn: false, signedOutReason: null })
+  assert.deepEqual(auth.status(), { client: { source: 'pasted', id: '123456789012…', fullId: CLIENT_ID }, pasted: true, pastedBroken: null, settingsMissing: [], signedIn: true, sessionOnly: false, signingIn: false, signedOutReason: null, needsWriteScope: false })
   assert.ok(!JSON.stringify(auth.status()).includes(CLIENT_SECRET))
 })
 

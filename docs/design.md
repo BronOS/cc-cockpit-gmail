@@ -8,6 +8,9 @@ panel, its reviewer use, its tests and fakes).
 0.2.0 (2026-11-03, designed with the user together with bronos.jira 0.5.0): Jira mail through the
 Jira plugin's `jira` service (section "Jira mail"), and a pasted client that survives a reinstall
 (section "Auth"); no app change needed (cc-cockpit 0.9.2).
+0.3.0 (2026-11-03, asked for by the user): the first write, limited to the read state: Mark read /
+Mark unread and markReadOnOpen (section "Read state"), with the scope gmail.modify; no app change
+needed (cc-cockpit 0.9.3).
 
 Prior art (port its decisions, not its user-specific text): the old cockpit's mail connector
 `~/Projects/claude-config/cockpit/connectors/mail.py` and `lib/convs.py` (queries, alert
@@ -24,7 +27,13 @@ app it says so in the panel instead of half working.
 - Google OAuth 2.0 through `ctx.oauth` (authorization code + PKCE, loopback redirect on 127.0.0.1,
   the system browser). Auth URL `https://accounts.google.com/o/oauth2/v2/auth?access_type=offline&prompt=consent`
   (without both Google sends no refresh token), token URL `https://oauth2.googleapis.com/token`,
-  scope `https://www.googleapis.com/auth/gmail.readonly` only.
+  scope `https://www.googleapis.com/auth/gmail.modify` only since 0.3.0 (0.1.0 and 0.2.0:
+  `gmail.readonly`). gmail.modify includes reading and is "restricted" like gmail.readonly, so for
+  the person's own client only the scope ticked on the Data access page changes (Internal: no
+  verification; External in production: the unverified screen once). Google's consent text for it
+  says "Read, compose, and send emails"; what the plugin does with it is section "Read state". An
+  older sign-in keeps reading (a refresh sends no scope; the grant keeps its own) and is asked to
+  sign in again before a write (section "Read state", "The scope upgrade").
 - The person brings the OAuth client, always (decided 2026-11-03: no shared client, neither
   unverified nor verified: the user does not want to be linked to the plugin's users, and Gmail
   scopes are "restricted", so a shared client would need Google's verification and a paid yearly
@@ -66,7 +75,7 @@ app it says so in the panel instead of half working.
 - Tokens are sent only to `https://gmail.googleapis.com` and the OAuth endpoints; never logged,
   never in a panel message, never in the CLI output.
 
-## Fetching (Gmail API v1, read-only)
+## Fetching (Gmail API v1)
 
 Three lists, as the old connector (settings in brackets, project scope, with these defaults):
 - Unread mail: `is:unread -in:spam -in:trash newer_than:<unreadDays 14>d` minus the alert senders,
@@ -103,8 +112,9 @@ Unread, Alerts (only with `alertSenders`), Read (last `readDays`). Settings `lan
 Jira) to hide any; "Issues per lane" style `rowsPerLane` with Show all / Hide (Jira 0.3.0, same
 muted link style as the Sessions panel). Order inside a lane: triage priority, then newest.
 
-Unread is Gmail's own UNREAD label (read-only: the plugin never changes it; opening a thread here
-does not mark it read in Gmail, and the README says so). No plugin seen state is needed.
+Unread is Gmail's own UNREAD label. Since 0.3.0 the plugin changes it (and only it) on Mark read /
+Mark unread and when a thread is opened with markReadOnOpen on (section "Read state"). No plugin
+seen state is needed.
 
 ## Triage (jev-triage `triage` v1, source `gmail`)
 
@@ -122,7 +132,7 @@ does not mark it read in Gmail, and the README says so). No plugin seen state is
 
 Rows as Jira's: a triage dot, sender, subject (bold when unread), snippet on a second line, age.
 Click / Enter opens the thread; hover buttons ↗ (the thread in Gmail: `https://mail.google.com/mail/?authuser=<address>#all/<threadId>`; `u/<address>/` gives a 404 in a browser not signed in to that account
-via `ctx.openExternal`), the triage verdict button ("action ▾", as Jira 0.4.0), Discuss, New.
+via `ctx.openExternal`), Mark read / Mark unread (0.3.0, section "Read state"), the triage verdict button ("action ▾", as Jira 0.4.0), Discuss, New.
 Header: title bar meta (last poll · address) and ↻. Not signed in: the panel shows what is missing
 (client id / secret) or the Sign in button, with a link to the README section.
 
@@ -189,12 +199,61 @@ ported, its text and the user's site and name not).
   fallback gets one `Jira issue KEY: summary (status, priority, assignee) url` line first.
 - `ccc gmail status` has a `jira` line (on / off).
 
+## Read state (0.3.0: mark read / mark unread)
+
+Asked for by the user on 2026-11-03: writes, limited to the read state. Code: `lib/http.js`
+(`setThreadUnread`), `lib/client.js` (`setUnread`), `lib/readstate.js` (the bound, the overlay), the
+host's `writeReadState` / `markRow`.
+
+- **One write, one label.** `POST users/me/threads/<id>/modify` with `{ removeLabelIds: ['UNREAD'] }`
+  (read) or `{ addLabelIds: ['UNREAD'] }` (unread), built in `http.readStateBody` from a boolean, so
+  no caller can pass a label list: the plugin never archives (INBOX), labels, stars, trashes or sends.
+  It is the only request that is not a GET; `test/manifest.test.js` checks the sources for any other
+  method, write endpoint or label list. threads.modify changes every message of the thread (Mark
+  unread makes all of them unread); the same call both ways keeps it one function.
+- **Where**: a hover button on every row: Mark read (an unread thread in Unread or Alerts; an alert
+  group: all of its unread threads), Mark unread (a read thread in Read). `ccc gmail read <id>`
+  (`alert:<name>` too) and `ccc gmail unread <threadId>`. Opening a thread from the panel marks it
+  read when the project setting `markReadOnOpen` (boolean, default true) is on: the threads the open
+  read fresh that have an UNREAD message (an alert row: the up to 10 it shows); in the background,
+  after the read, never for Discuss, New session or `ccc gmail show`.
+- **Optimistic**: the host keeps an override per thread (`S.marks`: unread or not) over the cached
+  lists (`readstate.overlayCache`): read leaves Unread and Alerts for Read (an alert sender's thread
+  does not show in Read, as in the poll), unread leaves Read for Unread, the messages take the new
+  state. The panel gets the moved row before the call. A failed call takes the override back (to an
+  earlier one of the same thread still waiting for a poll) and the panel says why ("… could not be
+  marked read in Gmail: …. It is back where it was."; for a group "1 of 2 threads of …"). A call that
+  succeeded keeps its override until a full poll that started after it (that poll read Gmail again);
+  a "no change" history answer does not clear it. A new account or client clears them all.
+- **Bound**: `readstate.createGate`: at most 4 calls at once and 120 started in any 60 s
+  (threads.modify is 10 quota units; an alert group is at most 100 threads, one minute's worth); past
+  that a call waits for the window, and past 300 waiting it is refused. One thread's calls go in
+  order (a quick read then unread lands as pressed). Deactivate stops the gate: what waits is
+  refused, every call checks `S.stopped` (and the generation) again when its turn comes, the request
+  carries the host's abort signal, and nothing is posted after stop: no call on a disposed ctx.
+  `ccc gmail read|unread` waits at most 25 s (the CLI deadline), then says it is still waiting.
+- **The scope upgrade.** A sign-in from 0.1.0 / 0.2.0 holds gmail.readonly. cc-cockpit's
+  `ctx.oauth` does not pass the token response's `scope` (as of 0.9.3; FRICTION.md), so the plugin
+  tells it apart without a request: the `signedIn` storage marker gets a `scope` (`modify` /
+  `readonly`) from 0.3.0 on, and a marker without one is a 0.2.0 sign-in, read-only. A 0.3.0 sign-in
+  asked for gmail.modify and is taken as granted unless the token response's `scope` says otherwise
+  (read when an app passes it) or the first write gets 403 insufficientPermissions (the Gmail box
+  unticked on Google's granular consent page); then the marker says `readonly`, the row goes back,
+  and no error notice: the prompt says it. Read-only sign-ins keep polling and opening as before;
+  writes are not tried (markReadOnOpen skips them silently), and the panel shows an info prompt
+  "Sign in again to allow marking mail read" with **Sign in again** and **Not now** (hidden for the
+  run; the next Mark read press shows it again); `ccc gmail status` has a `write` line, `ccc gmail
+  read` fails with the same text. Signing in again with the same Google account keeps the lanes and
+  the verdicts (the account is read with `profile` after the sign-in; another account starts over as
+  before), so nothing is judged by Jev again.
+
 ## CLI
 
-`ccc gmail status | refresh | list [lane] | show <threadId> | login | logout | help`. No stdin.
+`ccc gmail status | refresh | list [lane] | show <threadId> | read <threadId> | unread <threadId> |
+login | logout | client <file> | help`. No stdin.
 
 ## Left out of v1
 
-Writing (mark read, archive, labels, replies: needs `gmail.modify` and a review of the consent
-text), attachment download for non-images, push notifications (needs a
-public endpoint), several accounts in one project.
+Other writes (archive, labels, trash, replies: they would need a new review of what the scope's
+consent text allows and the plugin does), attachment download for non-images, push notifications
+(needs a public endpoint), several accounts in one project.

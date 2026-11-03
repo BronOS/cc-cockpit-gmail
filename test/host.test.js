@@ -124,13 +124,13 @@ test('a bad client file is refused with a reason by the paste box; nothing is st
   await h.stop()
 })
 
-test('sign in: the Google auth URL with offline access and consent, gmail.readonly only, the refresh token per project and client', async () => {
+test('sign in: the Google auth URL with offline access and consent, gmail.modify only, the refresh token per project and client', async () => {
   const { ctx, h, oauth } = await signedIn()
   assert.equal(oauth.authorizes.length, 1)
   const spec = oauth.authorizes[0]
   assert.equal(spec.authUrl, 'https://accounts.google.com/o/oauth2/v2/auth?access_type=offline&prompt=consent')
   assert.equal(spec.tokenUrl, 'https://oauth2.googleapis.com/token')
-  assert.deepEqual(spec.scopes, ['https://www.googleapis.com/auth/gmail.readonly'])
+  assert.deepEqual(spec.scopes, ['https://www.googleapis.com/auth/gmail.modify'])
   assert.equal(spec.clientId, CLIENT_ID)
   assert.equal(spec.clientSecret, CLIENT_SECRET)
   const pk = await ctx.storage.get('projectKey')
@@ -472,7 +472,7 @@ test('the verdict chooser stores an override and the row shows it; Undo clears i
 test('Open with the html reviewer: clean HTML, the inline logo as an asset, the details aside, the active tab', async () => {
   const calls = []
   const reviewer = { annotate: async (spec) => (calls.push(spec), { opened: true }) }
-  const { ctx, h, gmail } = await signedIn({ reviewer, sessions: [tab('t1', 'waiting'), tab('t2', 'working', { active: true })], gmail: { attachments: { '18f0a1b2c3d4e503': picture('png', 300) } } })
+  const { ctx, h, gmail } = await signedIn({ project: { alertSenders: ['alerts@example.com'], markReadOnOpen: false }, reviewer, sessions: [tab('t1', 'waiting'), tab('t2', 'working', { active: true })], gmail: { attachments: { '18f0a1b2c3d4e503': picture('png', 300) } } })
   await ctx.sendPanel({ type: 'open', id: T.t1 })
   assert.equal(calls.length, 1)
   const c = calls[0]
@@ -491,8 +491,10 @@ test('Open with the html reviewer: clean HTML, the inline logo as an asset, the 
   assert.match(c.aside, /Finance/, 'a user label by its name')
   assert.match(c.aside, /Open in Gmail/)
   assert.match(c.aside, /3 \(1 unread\)/)
-  // Read-only: opening never marks anything read.
-  assert.ok(gmail.calls.every((x) => !/modify|batchModify|trash|send/.test(x.path)))
+  // markReadOnOpen off: opening changes nothing in Gmail.
+  await h.writesIdle()
+  assert.ok(gmail.calls.every((x) => x.method === 'GET' && !/modify|batchModify|trash|send/.test(x.path)))
+  assert.equal(lane(ctx.lastState(), 'unread').rows.some((r) => r.id === T.t1), true)
   await h.stop()
 })
 

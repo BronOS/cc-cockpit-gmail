@@ -46,17 +46,23 @@ function rowClickOpens(inControl, selecting) {
 
 /**
  * The hover buttons of a row, in order: `{ action, label, title }`. `action` is the message type the
- * page posts (`wrong` only toggles the chooser in the page). There is no Read / Unread: the plugin
- * is read-only towards Gmail (design), and Gmail's own UNREAD label is what the lanes show.
+ * page posts (`wrong` only toggles the chooser in the page). Since 0.3.0 a row has Mark read (an
+ * unread thread, an alert group: all of its unread threads) or Mark unread (a read thread), the only
+ * change the plugin makes in Gmail; the host moves the row at once and back if Gmail refuses.
  *
  * The triage button is labelled with the verdict itself ("action ▾"), not "Wrong?" (bronos.jira
  * 0.4.0): the label says what triage decided, the chooser asks the question.
  *
- * @param {{ kind: string, verdict?: { priority: string } }} r
- * @param {{ triageOn: boolean }} s
+ * @param {{ kind: string, unread?: boolean, count?: number, verdict?: { priority: string } }} r
+ * @param {{ triageOn: boolean, write?: boolean }} s `write`: signed in (the read-state buttons show)
  */
 function rowButtons(r, s) {
   const out = [{ action: 'browser', label: '↗', title: r.kind === 'alert' ? 'Search this alert in Gmail' : 'Open in Gmail' }]
+  if (s && s.write) {
+    if (r.kind === 'alert') out.push({ action: 'markRead', label: 'Mark read', title: `Mark the alert's ${r.count > 1 ? `${r.count} unread mails` : 'unread mail'} read in Gmail` })
+    else if (r.unread) out.push({ action: 'markRead', label: 'Mark read', title: 'Mark the thread read in Gmail' })
+    else out.push({ action: 'markUnread', label: 'Mark unread', title: 'Mark the thread unread in Gmail' })
+  }
   if (s && s.triageOn) {
     const p = r.verdict && r.verdict.priority
     out.push({ action: 'wrong', label: p ? `${p} ▾` : 'triage ▾', title: p ? `Triage says ${p}: change how much this needs you` : 'Not triaged yet: say how much this needs you' })

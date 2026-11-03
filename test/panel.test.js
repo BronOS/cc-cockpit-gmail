@@ -28,7 +28,7 @@ test('rowClickOpens: not on a control, not while selecting', () => {
   assert.equal(rowClickOpens(false, true), false)
 })
 
-test('rowButtons: ↗, the verdict when triage is on, Discuss, New; never read/unread', () => {
+test('rowButtons: ↗, the verdict when triage is on, Discuss, New; no read/unread before sign-in', () => {
   const b = rowButtons({ kind: 'thread', verdict: { priority: 'action' } }, { triageOn: true })
   assert.deepEqual(b.map((x) => x.action), ['browser', 'wrong', 'discuss', 'newSession'])
   assert.equal(b[1].label, 'action ▾')
@@ -36,6 +36,18 @@ test('rowButtons: ↗, the verdict when triage is on, Discuss, New; never read/u
   assert.deepEqual(rowButtons({ kind: 'alert' }, { triageOn: false }).map((x) => x.action), ['browser', 'discuss', 'newSession'])
   assert.match(rowButtons({ kind: 'alert' }, {})[0].title, /Search this alert/)
   assert.ok(!rowButtons({ kind: 'thread' }, { triageOn: true }).some((x) => /read/i.test(x.action)))
+})
+
+test('rowButtons (0.3.0): Mark read on an unread thread and an alert group, Mark unread on a read thread, after ↗', () => {
+  const s = { triageOn: true, write: true }
+  assert.deepEqual(rowButtons({ kind: 'thread', unread: true }, s).map((x) => x.action), ['browser', 'markRead', 'wrong', 'discuss', 'newSession'])
+  assert.equal(rowButtons({ kind: 'thread', unread: true }, s)[1].label, 'Mark read')
+  const read = rowButtons({ kind: 'thread', unread: false }, s)[1]
+  assert.deepEqual([read.action, read.label], ['markUnread', 'Mark unread'])
+  const g = rowButtons({ kind: 'alert', unread: true, count: 3 }, s)[1]
+  assert.deepEqual([g.action, g.label], ['markRead', 'Mark read'])
+  assert.match(g.title, /3 unread mails read in Gmail/)
+  assert.ok(!rowButtons({ kind: 'alert', unread: true, count: 1 }, s).some((x) => x.action === 'markUnread'))
 })
 
 test('moveIndex', () => {
@@ -91,7 +103,7 @@ test('setup: the steps name both account kinds, every link id resolves, nothing 
   assert.match(all, /7 days/)
   assert.match(all, /Workspace .* choose Internal/)
   assert.match(all, /Desktop app/)
-  assert.match(all, /gmail\.readonly/)
+  assert.match(all, /gmail\.modify/)
   for (const s of STEPS) for (const l of s.links) assert.ok(linkUrl(l.id), l.id)
   for (const url of Object.values(LINKS)) assert.match(url, /^https:\/\/(console\.cloud\.google\.com|myaccount\.google\.com|github\.com\/BronOS\/cc-cockpit-gmail)[/#]/)
   for (const bad of ['constructor', '__proto__', 'toString', 'https://x', '', null, 1]) assert.equal(linkUrl(bad), null, String(bad))
@@ -139,7 +151,9 @@ test('cli: help, unknown commands and bad arguments exit 2', async () => {
   assert.equal((await runCli(['show'], d)).code, 2)
   assert.equal((await runCli(['show', '../etc'], d)).code, 2)
   assert.equal((await runCli(['client'], d)).code, 2)
-  assert.match(HELP, /never changes your mailbox/)
+  assert.match(HELP, /never archives,\nlabels, trashes or sends/)
+  assert.match(HELP, /ccc gmail read <id> +mark a thread read/)
+  assert.match(HELP, /ccc gmail unread <id> +mark a thread unread/)
 })
 
 test('cli: list, show, refresh, login, logout', async () => {

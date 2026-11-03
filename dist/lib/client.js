@@ -1,12 +1,12 @@
 'use strict'
-// The Gmail REST v1 client: read-only GETs on users/me (design "Fetching (Gmail API v1, read-only)").
-// No method here writes: there is no modify, send, trash or label call, and the scope
-// (gmail.readonly) would refuse one anyway.
+// The Gmail REST v1 client: GETs on users/me (design "Fetching (Gmail API v1)") and, since 0.3.0, one
+// write: `setUnread`, mark a thread read or unread (http.setThreadUnread: the UNREAD label and
+// nothing else). There is no send, trash, archive or label call.
 //
 // The access token comes from `getToken` (auth.js) on every request. A 401 means it died early
 // (revoked, the clock): the client drops it (`invalidate`), takes a fresh one and retries once.
 
-const { GmailError, gmailGet } = require('./http')
+const { GmailError, gmailGet, setThreadUnread } = require('./http')
 const { gmailId } = require('./util')
 
 const BASE = '/gmail/v1/users/me'
@@ -22,16 +22,29 @@ const MAX_ATTACHMENT_JSON = 1200000 // 700 KiB of picture as base64url in JSON, 
  * @param {typeof fetch} o.fetch
  */
 function createClient(o) {
-  async function get(path, params, extra = {}) {
+  /** `call(token)` with a live token; a 401 drops it and tries once more with a fresh one. */
+  async function withToken(call) {
     let token = await o.getToken()
     try {
-      return await gmailGet(path, { token, params, fetch: o.fetch, ...extra })
+      return await call(token)
     } catch (e) {
       if (!(e instanceof GmailError) || e.kind !== 'auth') throw e
       o.invalidate()
       token = await o.getToken()
-      return gmailGet(path, { token, params, fetch: o.fetch, ...extra })
+      return call(token)
     }
+  }
+
+  function get(path, params, extra = {}) {
+    return withToken((token) => gmailGet(path, { token, params, fetch: o.fetch, ...extra }))
+  }
+
+  /**
+   * Mark a thread read (`unread` false) or unread (true) in Gmail. Retried once after a 401 like a
+   * read (the change is idempotent). A sign-in without gmail.modify rejects with kind `scope`.
+   */
+  function setUnread(threadId, unread, signal) {
+    return withToken((token) => setThreadUnread(threadId, unread, { token, fetch: o.fetch, signal }))
   }
 
   /** `{ emailAddress, historyId }` of the signed-in account. */
@@ -118,7 +131,7 @@ function createClient(o) {
     return out
   }
 
-  return { get, profile, listThreads, thread, history, attachment, labels }
+  return { get, profile, listThreads, thread, history, attachment, labels, setUnread }
 }
 
 module.exports = { createClient, METADATA_HEADERS, BASE }

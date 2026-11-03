@@ -61,7 +61,7 @@ test('emailAddress lower-cases and refuses search syntax', () => {
 
 test('readSettings: defaults, clamps, lane switches, alert senders checked in code', () => {
   const { cfg, problems } = readSettings({})
-  assert.deepEqual(cfg, { clientId: '', clientSecret: '', lanes: { unread: true, alerts: true, read: true }, alertSenders: [], rowsPerLane: 10, unreadDays: 14, maxUnread: 15, readDays: 2, maxRead: 10, pollMinutes: 2, triageText: 'full' })
+  assert.deepEqual(cfg, { clientId: '', clientSecret: '', lanes: { unread: true, alerts: true, read: true }, alertSenders: [], rowsPerLane: 10, unreadDays: 14, maxUnread: 15, readDays: 2, maxRead: 10, pollMinutes: 2, triageText: 'full', markReadOnOpen: true })
   assert.deepEqual(problems, [])
   const r = readSettings({ clientId: 'nope', maxUnread: 1000, pollMinutes: 0, readDays: 'x', lanes: { read: false, unread: 'yes' }, alertSenders: ['A@x.org', 'a@x.org', '', 'bad one', 7], triageText: 'summary' })
   assert.equal(r.cfg.clientId, '')
@@ -71,6 +71,8 @@ test('readSettings: defaults, clamps, lane switches, alert senders checked in co
   assert.deepEqual(r.cfg.lanes, { unread: true, alerts: true, read: false })
   assert.deepEqual(r.cfg.alertSenders, ['a@x.org'])
   assert.equal(r.cfg.triageText, 'summary')
+  assert.equal(readSettings({ markReadOnOpen: false }).cfg.markReadOnOpen, false)
+  assert.equal(readSettings({ markReadOnOpen: 'no' }).cfg.markReadOnOpen, true)
   assert.equal(r.problems.length, 3)
   assert.match(r.problems[0], /^clientId: a Google client id ends in/)
   assert.match(r.problems[1], /"bad one" is not an email address/)
@@ -152,9 +154,9 @@ test('checkClientId and checkClientSecret', () => {
   assert.equal(checkClientSecret('é').ok, false)
 })
 
-test('oauthSpec: Google\'s fixed endpoints and the read-only scope, never the file\'s URLs', () => {
+test('oauthSpec: Google\'s fixed endpoints and gmail.modify (0.3.0: mark read), never the file\'s URLs', () => {
   assert.deepEqual(oauthSpec({ clientId: CLIENT_ID, clientSecret: CLIENT_SECRET }), { authUrl: AUTH_URL, tokenUrl: TOKEN_URL, clientId: CLIENT_ID, clientSecret: CLIENT_SECRET, scopes: [SCOPE] })
-  assert.equal(SCOPE, 'https://www.googleapis.com/auth/gmail.readonly')
+  assert.equal(SCOPE, 'https://www.googleapis.com/auth/gmail.modify')
   assert.match(AUTH_URL, /^https:\/\/accounts\.google\.com\/o\/oauth2\/v2\/auth\?access_type=offline&prompt=consent$/)
   assert.equal(TOKEN_URL, 'https://oauth2.googleapis.com/token')
   assert.equal(oauthSpec({ clientId: CLIENT_ID }).clientSecret, '')

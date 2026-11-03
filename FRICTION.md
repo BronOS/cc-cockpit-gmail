@@ -77,3 +77,16 @@ same for the reviewer refusing the HTML mode (the plugin falls back to text and 
 - **`reviewer`: the issue could only go below the mail.** Fixed in cc-cockpit 0.9.3 (annotate's
   `companion` and `features()`). Needed: read the mail and its issue side by side, notes on both.
   Did: the issue goes beside the mail when `features()` lists `companion`, below it otherwise.
+
+## Mark read (0.3.0, gmail.modify), 2026-11-03
+
+- **`types`: `OAuthTokens` has no `scope`: a plugin cannot see what the person granted.** Open.
+  Needed: tell a sign-in that can write (gmail.modify) from one that only reads (a 0.2.0 sign-in
+  with gmail.readonly, or Google's granular consent with the Gmail box unticked), to ask for a new
+  sign-in before a write fails. Guide: `OAuthTokens` is `{ accessToken, refreshToken, expiresAt }`;
+  the app's token parser (`src/main/oauth/oauth.ts`) drops the response's `scope` (RFC 6749 §5.1).
+  Did: a `scope` in the plugin's own `signedIn` storage marker (none = a 0.2.0 sign-in, read-only),
+  a 0.3.0 sign-in taken as granted until the first write gets 403 insufficientPermissions, and
+  `scope` read from the tokens should an app pass it (`grantedScope`, `dist/lib/oauth-client.js`).
+  Would help: `scope?: string` (the granted scopes, as the provider sent them) in `OAuthTokens`
+  from `authorize` and `refresh`.

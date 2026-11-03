@@ -75,7 +75,7 @@ const PROMPT_MAX = 16000
  */
 function discussPrompt(subject, sender, text, max = PROMPT_MAX) {
   const head = `About the mail "${cut(oneLine(subject) || '(no subject)', 200)}" from ${cut(oneLine(sender) || 'unknown', 120)}`
-  const body = `${head}\n\nThe thread as it is now (read-only; the plugin does not change anything in Gmail):\n\n${text}`
+  const body = `${head}\n\nThe thread as it is now (a read-only copy: nothing done with it here changes Gmail):\n\n${text}`
   return cut(body, max)
 }
 
