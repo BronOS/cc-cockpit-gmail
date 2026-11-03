@@ -131,6 +131,7 @@ function statusText(st, now = Date.now()) {
   lines.push(`lanes     ${countsLine(st)}`)
   lines.push(`triage    ${st.triage}`)
   lines.push(`view      ${st.annotate}`)
+  if (st.jira) lines.push(`jira      ${st.jira}`)
   for (const p of st.problems || []) lines.push(`problem   ${p}`)
   if (st.error) lines.push(`error     ${st.error}`)
   for (const [lane, msg] of Object.entries(st.laneErrors || {})) lines.push(`error     ${lane}: ${msg}`)

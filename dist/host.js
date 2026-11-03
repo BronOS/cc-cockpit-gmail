@@ -34,6 +34,9 @@ const { STEPS, linkUrl } = require('./lib/setup')
 const { runCli } = require('./lib/cli')
 const { jsonFile } = require('./lib/store')
 const { hashOf, sha, oneLine, cut, rowId, mapLimit } = require('./lib/util')
+const { esc } = require('./lib/entities')
+const J = require('./lib/jira')
+const { MAX_TOTAL_CHARS } = require('./lib/images')
 
 const PANEL = 'main'
 const SOURCE = 'gmail' // the triage source name: verdicts, overrides and cases group by it
@@ -46,6 +49,23 @@ const ALERT_THREADS_SHOWN = 10 // design: opening an alert row shows its newest 
 const BODY_PART_MAX = 2 * 1024 * 1024 // a text body Gmail did not send inline, fetched apart
 // The reader page gets the html in parts: a page message is at most 1,040,384 chars of JSON.
 const PAGE_HTML_PART = 400000
+// Jira mail (0.2.0, the bronos.jira plugin's `jira` service). A poll waits for Jira at most this long
+// (site() and the lookups of one triage round); what lands later re-judges the rows.
+const JIRA_SITE_WAIT_MS = 2000
+const JIRA_LOOKUP_WAIT_MS = 4000
+// The thread view of a Jira mail: the issue beside the mail (the reviewer's `companion`, cc-cockpit
+// 0.9.3+), else below it. The pictures are one budget for both in the reviewer (8 MiB and 30 in all),
+// so they are split: the issue 7 pictures and 3.5 MiB of them, the mail 8 pictures and 4 MiB. Below
+// the mail the issue also shares the mail's 2 MiB of html and gets at most 800 KB (its oldest
+// comments give way); beside it, it is a document of its own and may take the Jira plugin's 2 MB.
+const JIRA_VIEW_WAIT_MS = 15000
+const JIRA_DOC = { maxHtmlBytes: 800000, maxImages: 7, maxImageChars: 3.5 * 1024 * 1024, waitMs: 8000 }
+const JIRA_COMPANION_DOC = { ...JIRA_DOC, maxHtmlBytes: 2000000 }
+// How long an open waits for the reviewer's features() (a host-local call; a provider still
+// activating makes it wait).
+const FEATURES_WAIT_MS = 2000
+const MAIL_IMAGES_WITH_JIRA = { max: 8, totalChars: 4 * 1024 * 1024 }
+const MAX_ASSETS = 30 // the reviewer's cap
 
 let instance = null
 
@@ -69,6 +89,7 @@ function start(ctx, io = {}) {
   const now = io.now || Date.now
   const triage = ctx.services.use('triage')
   const reviewer = ctx.services.use('reviewer')
+  const jira = ctx.services.use('jira')
   const cacheFile = jsonFile(ctx.dataDir, 'cache.json')
   const abort = new AbortController()
   const gaps = apiGaps(ctx)
@@ -176,6 +197,103 @@ function start(ctx, io = {}) {
   function annotateOn() {
     return !S.annotateMissing && ctx.services.available('reviewer')
   }
+  function jiraOn() {
+    return ctx.services.available('jira')
+  }
+
+  // ---- Jira mail (lib/jira.js; optional: without the jira service nothing here runs) ----
+
+  const jiraSite = J.createSiteCache({ site: () => jira.site(), now })
+  const lookups = J.createLookups({ issue: (key, o) => jira.issue(key, o), now, onLate: () => void classifyChanged() })
+
+  /** The Jira hints of the rows that are Jira mail: row id -> `{ key, hint? , floor? }`. */
+  async function jiraHints(rows, me) {
+    const out = new Map()
+    if (!jiraOn()) return out
+    const j = await jiraSite.get(JIRA_SITE_WAIT_MS)
+    if (!j) return out
+    const found = []
+    for (const r of rows) {
+      const f = J.jiraFacts(r, j, me)
+      if (f) found.push([r.id, f])
+    }
+    if (!found.length) return out
+    // A move needs no lookup (rule 1); the others ask Jira, bounded in time.
+    const wants = found.filter(([, f]) => f.key && !J.jiraHint(f, undefined)).map(([, f]) => ({ key: f.key, newestAt: f.newestAt }))
+    const r = await lookups.ensure(wants, io.jiraLookupWaitMs === undefined ? JIRA_LOOKUP_WAIT_MS : io.jiraLookupWaitMs)
+    if (r.late) ctx.log.info(`jira: ${r.late} issue lookup(s) still running; those rows are judged again when they land`)
+    for (const [id, f] of found) {
+      const h = J.jiraHint(f, f.key ? lookups.peek(f.key, f.newestAt) : undefined)
+      out.set(id, { key: f.key, ...(h && h.hint ? { hint: h.hint } : {}), ...(h && h.floor ? { floor: h.floor } : {}) })
+    }
+    return out
+  }
+
+  /** A promise that rejects after `ms` (the Jira plugin's calls have no timeout of their own). */
+  function within(p, ms) {
+    let timer
+    return Promise.race([p, new Promise((_, rej) => (timer = setTimeout(() => rej(new Error('the Jira plugin did not answer in time')), ms)))]).finally(() => clearTimeout(timer))
+  }
+
+  /**
+   * Whether the reviewer can show a second document beside the first (annotate's `companion`): its
+   * features() says so from cc-cockpit 0.9.3 on. An older reviewer has no features() (the call
+   * rejects with "has no method") and would ignore a companion, so anything but a yes is a no.
+   */
+  async function reviewerHasCompanion() {
+    try {
+      const f = await within(reviewer.features(), FEATURES_WAIT_MS)
+      return Array.isArray(f) && f.includes('companion')
+    } catch {
+      return false
+    }
+  }
+
+  /**
+   * The issue a thread opened in full is about, when it is Jira mail: `{ key, result, companion }`,
+   * where `result` resolves (never rejects) with `{ issue, doc, note, url }` from the service,
+   * started now so it runs while the mail's pictures download. `companion`: the issue is asked for
+   * to be shown beside the mail (a larger html budget). Null for any other mail or without Jira.
+   */
+  async function jiraThread(t, { companion = false } = {}) {
+    if (t.alert || !jiraOn()) return null
+    const j = await jiraSite.get(JIRA_SITE_WAIT_MS)
+    if (!j) return null
+    const facts = t.messages.map(compactMessage)
+    const texts = []
+    t.messages.forEach((raw, i) => {
+      if (!J.isFromJira(facts[i], j.senders)) return
+      const w = walkMessage(raw)
+      const extra = t.bodies && t.bodies.get(String(raw.id))
+      for (const x of [w.html, w.plain, extra && extra.html, extra && extra.plain]) if (x) texts.push(decode(x))
+    })
+    const found = J.threadIssue({ title: t.title, facts, texts }, j)
+    if (!found) return null
+    const key = found.key
+    const result = (async () => {
+      const wait = io.jiraViewWaitMs === undefined ? JIRA_VIEW_WAIT_MS : io.jiraViewWaitMs
+      const [i, d] = await Promise.allSettled([within(jira.issue(key, { maxAgeMs: 60000 }), wait), within(jira.document(key, companion ? JIRA_COMPANION_DOC : JIRA_DOC), wait)])
+      const issue = i.status === 'fulfilled' && i.value && typeof i.value === 'object' ? i.value : null
+      const doc = d.status === 'fulfilled' ? d.value : null
+      const note = d.status === 'rejected' ? (d.reason && d.reason.message) || String(d.reason) : ''
+      if (note) ctx.log.warn(`jira: the issue ${key} with the mail: ${note}`)
+      const url = [doc && doc.url, issue && issue.url].find((u) => typeof u === 'string' && u.startsWith(`${j.site}/`)) || `${j.site}/browse/${key}`
+      return { issue, doc, note, url }
+    })()
+    return { key, result, companion }
+  }
+
+  /** Jira's pictures that still fit beside the mail's: 30 and 7.5 MiB in all (the reviewer's 8 MiB, with room). */
+  function fitAssets(own, extra) {
+    let total = own.reduce((n, a) => n + a.dataUrl.length, 0)
+    const out = []
+    for (const a of extra) {
+      if (own.length + out.length >= MAX_ASSETS || total + a.dataUrl.length > MAX_TOTAL_CHARS) continue
+      total += a.dataUrl.length
+      out.push(a)
+    }
+    return out
+  }
 
   // ---- polling ----
 
@@ -268,7 +386,12 @@ function start(ctx, io = {}) {
         return
       }
       const me = (S.cache && S.cache.account) || ''
-      const items = allRows(S.view).map((r) => triageItem(r, cfg().triageText, me))
+      const rows = allRows(S.view)
+      const jiraOf = await jiraHints(rows, me).catch((e) => {
+        ctx.log.warn(`jira hints: ${e && e.message ? e.message : e}`)
+        return new Map()
+      })
+      const items = rows.map((r) => triageItem(r, cfg().triageText, me, jiraOf.get(r.id) || null))
       const ids = new Set(items.map((i) => i.id))
       const todo = items.filter((it) => force.has(it.id) || S.sigs[it.id] !== hashOf(it))
       // Forget verdicts of rows no longer shown (bounded by what the lanes hold).
@@ -442,7 +565,7 @@ function start(ctx, io = {}) {
     messages.sort((a, b) => Number(a.internalDate || 0) - Number(b.internalDate || 0))
     const lead = [...messages].reverse().map(compactMessage).find((m) => m.address !== account) || compactMessage(messages[messages.length - 1])
     const bodies = await bigBodies(messages, signal)
-    return { title, sender: lead.from || lead.address, messages, url, note, key, bodies }
+    return { title, sender: lead.from || lead.address, messages, url, note, key, bodies, alert: Boolean(which.alert) }
   }
 
   /** Text bodies Gmail did not send inline (very long mails): fetched as attachments, capped. */
@@ -482,11 +605,14 @@ function start(ctx, io = {}) {
 
   /**
    * The thread as HTML plus the image assets: the image parts chosen by images.selectImages, from
-   * the cache or downloaded, waited for at most WAIT_MS.
+   * the cache or downloaded, waited for at most WAIT_MS. With `jx` (Jira mail) the issue comes too:
+   * as `companion` (annotate's, beside the mail) when `beside` and its document came, else as a
+   * section below the mail (a failed document leaves a short note there).
    */
-  async function threadView(t, withAside) {
+  async function threadView(t, withAside, jx, beside = false) {
     const pics = t.messages.flatMap((m) => walkMessage(m).images.map((i) => ({ ...i, messageId: String(m.id), at: Number(m.internalDate) || 0 })))
-    const { wanted } = selectImages(pics)
+    // With the Jira issue below the mail the picture budget is shared (JIRA_DOC).
+    const { wanted } = selectImages(pics, jx ? MAIL_IMAGES_WITH_JIRA : {})
     let assets = []
     let byKey = new Map()
     if (wanted.length) {
@@ -502,8 +628,30 @@ function start(ctx, io = {}) {
       for (const f of r.failed) ctx.log.warn(`image ${f.name}: ${f.message}`)
       if (r.late) ctx.log.info(`${r.late} image(s) not downloaded in time, listed by name (cached for the next open)`)
     }
-    const doc = threadDocument({ title: t.title, messages: t.messages, assets: byKey, bodies: t.bodies, url: t.url, labels: await labelNames(t.messages), note: t.note, aside: Boolean(withAside) })
-    return { html: doc.html, assets, aside: doc.aside }
+    let tail = ''
+    let asideTail = ''
+    let jiraAssets = []
+    let companion = null
+    if (jx) {
+      const r = await jx.result
+      const maxHtml = jx.companion ? JIRA_COMPANION_DOC.maxHtmlBytes : JIRA_DOC.maxHtmlBytes
+      const checked = r.doc ? J.checkDocument(r.doc, maxHtml, new Set(assets.map((a) => a.id))) : null
+      const ok = checked && !checked.error ? checked : null
+      // A document asked for with the larger budget does not fit below the mail: there it is too long.
+      const below = ok && Buffer.byteLength(ok.html, 'utf8') > JIRA_DOC.maxHtmlBytes ? null : ok
+      const sec = J.jiraSection({ key: jx.key, url: r.url, issue: r.issue, doc: beside ? ok : below, note: (checked && checked.error) || (ok && !below ? 'the issue is too long to show below the mail' : '') || r.note, esc })
+      if (beside && ok) {
+        // Beside the mail: its own document, its own facts; the mail keeps its html and details alone.
+        companion = J.jiraCompanion({ key: jx.key, checked: ok, assets: fitAssets(assets, ok.assets), url: r.url, fallbackFacts: sec.aside })
+      } else {
+        // Below the mail; any failure leaves the mail alone with a short note.
+        tail = sec.html
+        asideTail = sec.aside
+        if (below) jiraAssets = fitAssets(assets, below.assets)
+      }
+    }
+    const doc = threadDocument({ title: t.title, messages: t.messages, assets: byKey, bodies: t.bodies, url: t.url, labels: await labelNames(t.messages), note: t.note, aside: Boolean(withAside), tail, asideTail })
+    return { html: doc.html, assets: [...assets, ...jiraAssets], aside: doc.aside, companion }
   }
 
   function setNotice(text, kind = 'info') {
@@ -517,18 +665,48 @@ function start(ctx, io = {}) {
    * step taken once a call proved the one before is not there (as bronos.jira):
    *   annotate({ html, assets, aside }) -> rejected (not "no method") -> annotate({ text })
    *   -> "no method annotate" or no reviewer -> panels/thread.html with the same HTML.
+   * Jira mail: the issue goes beside the mail (annotate's `companion`) when the reviewer's features()
+   * says it can; a refused companion call is tried once more with the issue below the mail, as an
+   * older reviewer gets it, before text.
    * Opening never marks the thread read in Gmail (read-only).
    */
   async function openThread(id) {
     const t = await loadThread(id)
-    const text = readableText({ subject: t.title, messages: t.messages, url: t.url, note: t.note, bodies: t.bodies })
+    // Asked only when it can matter: an html annotate this run, and Jira on.
+    const beside = annotateOn() && !S.htmlRejected && jiraOn() && !t.alert ? await reviewerHasCompanion() : false
+    const jx = await jiraThread(t, { companion: beside }).catch((e) => {
+      ctx.log.warn(`jira: ${e && e.message ? e.message : e}`)
+      return null
+    })
+    let text = readableText({ subject: t.title, messages: t.messages, url: t.url, note: t.note, bodies: t.bodies })
     const docs = {}
-    const view = async (aside = false) => (docs[aside] = docs[aside] || (await threadView(t, aside)))
+    const view = async (aside = false, withCompanion = false) => {
+      const k = `${aside}:${withCompanion}`
+      return (docs[k] = docs[k] || (await threadView(t, aside, jx, withCompanion)))
+    }
+    const withJiraLine = async () => {
+      if (!jx) return text
+      const r = await jx.result
+      return `${J.jiraLine(jx.key, r.issue, r.url)}\n\n${text}`
+    }
     if (annotateOn()) {
       const pick = pickTab(await ctx.sessions.list().catch(() => []))
       const base = { title: cut(oneLine(t.title), 200) || '(no subject)', ...(t.url ? { url: t.url } : {}), key: t.key, ...(pick.tabId ? { tabId: pick.tabId } : {}) }
       let htmlError = null
-      if (!S.htmlRejected) {
+      if (!S.htmlRejected && jx && beside) {
+        const v = await view(true, true)
+        if (v.companion) {
+          try {
+            // The mail's column header: "Mail" and "Open in Gmail ↗" (the issue's says Jira).
+            await reviewer.annotate({ ...base, label: 'Mail', urlLabel: 'Gmail', html: v.html, ...(v.aside ? { aside: v.aside } : {}), ...(v.assets.length ? { assets: v.assets } : {}), companion: v.companion })
+            return
+          } catch (e) {
+            if (isMissingAnnotate(e)) noAnnotate()
+            else ctx.log.info(`reviewer refused the issue beside ${id} (${e && e.message ? e.message : e}); trying it below the mail`)
+          }
+        }
+      }
+      if (!S.htmlRejected && !S.annotateMissing) {
         const v = await view(true)
         try {
           await reviewer.annotate({ ...base, html: v.html, ...(v.aside ? { aside: v.aside } : {}), ...(v.assets.length ? { assets: v.assets } : {}) })
@@ -543,6 +721,7 @@ function start(ctx, io = {}) {
       }
       if (!S.annotateMissing) {
         try {
+          text = await withJiraLine()
           await reviewer.annotate({ ...base, text: cut(text, 400000) })
           if (htmlError) {
             S.htmlRejected = htmlError
@@ -857,6 +1036,7 @@ function start(ctx, io = {}) {
           ? `reviewer.annotate, text only (its html mode was refused: ${S.htmlRejected})`
           : 'reviewer.annotate (the thread as clean HTML with its pictures, notes on it)'
         : "the plugin's reader page (no reviewer with annotate in this project)",
+      jira: jiraOn() ? 'on (bronos.jira): Jira mail gets hints, and the issue shows beside the mail (below it with a reviewer older than cc-cockpit 0.9.3)' : 'off: enable the Jira plugin (bronos.jira) in this project for Jira mail hints and the issue beside the mail',
       error: S.error,
       laneErrors: S.laneErrors,
       threadErrors: S.stats ? S.stats.threadErrors : [],

@@ -5,14 +5,17 @@ start with the old connector's shape, triage by Jev triage). External plugin (ow
 `BronOS/cc-cockpit-gmail`, for the marketplace). The second source plugin for jev-triage, after
 Jira; built the same way (`~/Projects/cc-cockpit-jira` is the model: its docs/design.md, its
 panel, its reviewer use, its tests and fakes).
+0.2.0 (2026-11-03, designed with the user together with bronos.jira 0.5.0): Jira mail through the
+Jira plugin's `jira` service (section "Jira mail"), and a pasted client that survives a reinstall
+(section "Auth"); no app change needed (cc-cockpit 0.9.2).
 
 Prior art (port its decisions, not its user-specific text): the old cockpit's mail connector
 `~/Projects/claude-config/cockpit/connectors/mail.py` and `lib/convs.py` (queries, alert
 grouping, triage text, hints). It read Gmail through the `gws` CLI; this plugin talks to the
 Gmail REST API itself.
 
-Manifest: `services: { uses: { triage: 1, reviewer: 1 } }` (both optional at run time, as in
-Jira); a panel (default zone right) with lanes; CLI `ccc gmail`. Needs cc-cockpit 0.9.1+
+Manifest: `services: { uses: { triage: 1, reviewer: 1, jira: 1 } }` (all optional at run time, as in
+Jira; `jira` since 0.2.0); a panel (default zone right) with lanes; CLI `ccc gmail`. Needs cc-cockpit 0.9.1+
 (`ctx.oauth`, `ctx.secrets`, `ctx.panels.header`, `ctx.openExternal`, reviewer `aside`); on an older
 app it says so in the panel instead of half working.
 
@@ -32,8 +35,13 @@ app it says so in the panel instead of half working.
   **Paste the client file** box: the JSON Google offers to download (`{"installed": {"client_id",
   "client_secret", ...}}`, also what the gws CLI keeps in `~/.config/gws/client_secret.json`). The
   host checks it (an `installed` client, Google's auth and token URIs, an id ending in
-  `.apps.googleusercontent.com`) and stores id and secret itself (the secret in `ctx.secrets`, not
-  in a plain setting), then offers Sign in. `ccc gmail client <path-to-json>` does the same from a
+  `.apps.googleusercontent.com`) and stores id and secret itself, then offers Sign in. 0.1.0 kept
+  the secret in `ctx.secrets`; since 0.2.0 the whole client is one `ctx.storage` record (`client:
+  { clientId, clientSecret }`), because an uninstall deletes every `ctx.secrets` key of the plugin
+  (the app's rule, `installer.ts`) and keeps `ctx.storage`: after an uninstall and a Marketplace
+  install (seen 2026-11-03) the client was gone. A Desktop app client's secret is not confidential
+  in Google's terms (an installed app cannot keep one; the downloaded file is plain text), unlike
+  the refresh token. Load moves a 0.1.0 keychain copy into the record and deletes the old key. `ccc gmail client <path-to-json>` does the same from a
   file. The settings fields stay for people who prefer them; a pasted client wins until removed.
   The README has the same steps with screenshots-free text, with the two cases:
   - Personal Gmail: user type External, publishing status **In production** (unverified). In
@@ -43,10 +51,16 @@ app it says so in the panel instead of half working.
 - Sign in: a "Sign in with Google" button in the panel (and `ccc gmail login`, which only starts
   it: the browser does the rest) calls `ctx.oauth.authorize`. The refresh token goes to
   `ctx.secrets` under a key per project and client (`refresh:<projectKey>:<sha256(clientId) 12>`,
-  since secrets are app-wide while accounts are per project); the access token stays in memory
+  since secrets are app-wide while accounts are per project; `projectKey` is a random id in this
+  project's `ctx.storage`, which is per project and kept by an uninstall, so the key is the same
+  after a reinstall: nothing in `ctx` is steadier, as `ctx.storage` and `ctx.dataDir` both follow the
+  app's project id and `ctx.projectDir` is the folder path); the access token stays in memory
   and is refreshed by `ctx.oauth.refresh` shortly before `expiresAt`. `invalid_grant` = signed out:
   drop the token, show "Sign in again" (the 7-day Testing expiry is the usual cause: say so).
-  "Sign out" deletes the secret. Changing `clientId` signs out.
+  "Sign out" deletes the secret. Changing `clientId` signs out. The refresh token cannot outlive an
+  uninstall (the app deletes it); a `ctx.storage` marker `signedIn: { client: <sha256(clientId) 12> }`,
+  set with the refresh token and deleted with it, lets the panel say "the stored sign-in is gone
+  (uninstalled): sign in again" instead of looking like a first setup.
 - The account: `GET users/me/profile` (emailAddress, historyId) after sign in; shown in the title
   bar (`ctx.panels.header` meta, like Jira: last poll · address) with a ↻ action.
 - Tokens are sent only to `https://gmail.googleapis.com` and the OAuth endpoints; never logged,
@@ -94,13 +108,13 @@ does not mark it read in Gmail, and the README says so). No plugin seen state is
 
 ## Triage (jev-triage `triage` v1, source `gmail`)
 
-- item: `{ id: threadId | "alert:<name>", text, hint?, floor?, fields: { from, to, lane, list } }`.
+- item: `{ id: threadId | "alert:<name>", text, hint?, floor?, fields: { from, to, lane, list, jira? } }`
+  (`jira`: the issue key of a Jira mail, 0.2.0).
 - text (`triageText: full`): who it is from and to, the subject, earlier messages of the thread as
   context (sender + snippet), then the newest message's snippet marked as new. `summary`: only
   from + subject (for an employer that objects to mail text leaving).
-- hints (the old connector's rules that need no Jira): every alert -> noise. The Jira-mail hints
-  (moves = noise, Done = fyi, mention of me on my open issue = action) need Jira lookups: left out
-  of v1 (a later version can ask the Jira plugin through a service).
+- hints: every alert -> noise; Jira mail (0.2.0) per section "Jira mail": moves only = hint noise,
+  about a Done issue = hint fyi, only mentions me on / creates my open issue = floor action.
 - Classify only what is shown and changed (hash of the item); listen to triage `change`; without
   triage the panel works unsorted and says triage is off (as Jira).
 
@@ -127,6 +141,54 @@ Header: title bar meta (last poll · address) and ↻. Not signed in: the panel 
 - `aside`: from, to, cc, date, labels, the thread's message count, the Gmail link.
 - Discuss / New session send a prompt `About the mail "<subject>" from <sender>` + readable text.
 
+## Jira mail (0.2.0, the bronos.jira `jira` service v1)
+
+`uses: { jira: 1 }`, optional: with `ctx.services.available('jira')` false (no Jira plugin, off,
+or another major) nothing below runs and the items are exactly 0.1.0's. Code: `lib/jira.js` (pure),
+the host's `jiraHints` / `jiraThread`. Prior art: the old connector's `Hints` and `show` (decisions
+ported, its text and the user's site and name not).
+
+- `site()` (asked at most every 5 min, raced against 2 s) gives `{ ready, site, senders }`; not
+  ready, not https or no senders = no Jira. A message is from Jira when its sender address is one of
+  `senders` (exact, lower case). Its key: the first issue key in the subject (`[A-Z][A-Z0-9_]*-N`,
+  not inside a word), else the first `<site>/browse/KEY` in the snippet (polling) or in the Jira
+  messages' bodies (thread view).
+- Hints, only for an unread thread, on its new messages (the unread ones not from the person; the
+  lead message when none): (1) every new message is Jira's and its snippet says it "moved a work
+  item" (or "issue") -> hint noise, no lookup; (2) a new Jira message's issue is Done now -> hint fyi;
+  (3) every new message is Jira's and each "mentioned you on" or "created a work item", and the issue
+  is open and `mine` -> floor action. Else no hint (Jev). The order is the old connector's.
+- Lookups (`createLookups`): `issue(key, { maxAgeMs })` with `maxAgeMs` = the age of the newest Jira
+  mail about the key (15 s .. 10 min), so Jira's poll answers when it is newer than the mail. Cached
+  per key: asked again after 10 min, after a newer mail, or a minute after a failure; an answer
+  past its TTL is still used while the new one comes (no hint flapping, no extra Jev calls); never
+  one older than the newest mail. At most 10 started a round (Jira allows 30 a minute), at most 300
+  kept. A round waits at most 4 s; a lookup that lands later triggers one more classify, where only
+  the changed items go to triage.
+- Thread view, beside the mail (cc-cockpit 0.9.3+): when the reviewer's `features()` lists
+  `companion` (asked at each open, raced against 2 s; an older reviewer has no `features` and the
+  call rejects, read as no), the issue goes to annotate as `companion: { title, html, facts, url,
+  assets, label: 'Jira · KEY', urlLabel: 'Jira' }` and the mail with `label: 'Mail', urlLabel:
+  'Gmail'` (the reviewer's column header bars: the label and an "Open in <urlLabel> ↗" button): the
+  document as the Jira plugin sent it, `document()` asked with `maxHtmlBytes: 2000000` (a document of its own, not a
+  share of the mail's 2 MB), its own `aside` as `facts` (else the facts `jiraSection` makes from
+  `issue()`), and its pictures through `fitAssets` (the reviewer has one budget for both
+  documents). The mail's html and details column are then the mail's alone. A refused companion
+  call is tried once more as below (a document over 800 KB is then too long there, said in the
+  note), before text. A failed document: no companion, the section below with its note.
+- Thread view, below the mail (an older reviewer, or the fallback above): a thread (not an alert group) with a Jira message and a key starts `issue(key)` and
+  `document(key, { maxHtmlBytes: 800000, maxImages: 7, maxImageChars: 3.5 MiB, waitMs: 8000 })`
+  at once, raced against 15 s, while the mail's pictures download with a smaller share (8, 4 MiB):
+  together under the reviewer's 30 assets / 8 MiB (`fitAssets` drops Jira pictures that would not
+  fit, which then show their alt text). The document is checked (`checkDocument`: html a string
+  within the budget, assets with plain ids not used by the mail and `data:image/(png|jpeg|gif|webp)`
+  URLs); its headings go two levels down under `<h2>Jira issue KEY</h2>` (linked) after the
+  messages, its bytes counted first in the 2 MB page so the oldest messages give way. The details
+  column gets Jira issue / Status / Priority / Assignee (`(you)` when mine) from `issue()`. Any
+  failure: the mail alone plus `The issue is not shown here: <why>`, logged. The reviewer's text
+  fallback gets one `Jira issue KEY: summary (status, priority, assignee) url` line first.
+- `ccc gmail status` has a `jira` line (on / off).
+
 ## CLI
 
 `ccc gmail status | refresh | list [lane] | show <threadId> | login | logout | help`. No stdin.
@@ -134,5 +196,5 @@ Header: title bar meta (last poll · address) and ↻. Not signed in: the panel 
 ## Left out of v1
 
 Writing (mark read, archive, labels, replies: needs `gmail.modify` and a review of the consent
-text), the Jira-mail hints, attachment download for non-images, push notifications (needs a
+text), attachment download for non-images, push notifications (needs a
 public endpoint), several accounts in one project.

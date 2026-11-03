@@ -1,10 +1,11 @@
 'use strict'
-// The sign-in on its own: the client (pasted or settings), the refresh token per project and
-// client in ctx.secrets, the access token in memory, invalid_grant, a locked keyring.
+// The sign-in on its own: the client (pasted or settings; a pasted one in ctx.storage since 0.2.0), the
+// refresh token per project and client in ctx.secrets, the access token in memory, invalid_grant, a locked keyring.
 const test = require('node:test')
 const assert = require('node:assert/strict')
 const { createAuth, isInvalidGrant, refreshKey, clientKey, AuthError, EARLY_MS } = require('../dist/lib/auth')
 const { readSettings } = require('../dist/lib/settings')
+const { sha } = require('../dist/lib/util')
 const { fakeOAuth, fakeSecrets, fakeStorage, tokens, fixture, NOW, CLIENT_ID, CLIENT_SECRET, SETTINGS_CLIENT } = require('./fakes')
 
 const FILE = JSON.stringify(fixture('client_secret.json'))
@@ -60,41 +61,90 @@ test('the project key is made once and kept', async () => {
   assert.match(c.auth.A.projectKey, /^[a-f0-9]{12}$/)
 })
 
-test('pasteClient stores the secret in ctx.secrets and only the id in storage', async () => {
+test('pasteClient keeps the client whole in storage (it survives a reinstall), nothing in ctx.secrets', async () => {
   const { auth, secrets, storage } = make()
   await auth.load(cfg())
   const r = await auth.pasteClient(FILE)
   assert.deepEqual(r, { ok: true, changed: true, clientId: CLIENT_ID })
-  assert.equal(await secrets.get(clientKey(auth.A.projectKey, CLIENT_ID)), CLIENT_SECRET)
-  assert.deepEqual(await storage.get('client'), { clientId: CLIENT_ID })
+  assert.deepEqual(await storage.get('client'), { clientId: CLIENT_ID, clientSecret: CLIENT_SECRET })
+  assert.deepEqual(await secrets.keys(), [])
   assert.deepEqual(auth.status().client, { source: 'pasted', id: '123456789012…', fullId: CLIENT_ID })
   assert.deepEqual(await auth.pasteClient(FILE), { ok: true, changed: false, clientId: CLIENT_ID })
 })
 
-test('a pasted client survives a restart; a secret gone from the keychain is reported, not used', async () => {
+test('a pasted client survives a restart, and an uninstall (secrets emptied, storage kept)', async () => {
   const a = make()
   await a.auth.load(cfg())
   await a.auth.pasteClient(FILE)
   const b = make({ secrets: a.secrets, storage: a.storage })
   await b.auth.load(cfg())
   assert.equal(b.auth.client().clientId, CLIENT_ID)
-  await a.secrets.delete(clientKey(a.auth.A.projectKey, CLIENT_ID))
-  const c = make({ secrets: a.secrets, storage: a.storage })
+  // Uninstall + reinstall: the app deletes every ctx.secrets key of the plugin, ctx.storage stays.
+  const c = make({ secrets: fakeSecrets(), storage: a.storage })
+  await c.auth.load(cfg())
+  assert.deepEqual(c.auth.client(), { clientId: CLIENT_ID, clientSecret: CLIENT_SECRET, source: 'pasted' })
+  assert.equal(c.auth.status().pastedBroken, null)
+  assert.equal(c.auth.A.projectKey, a.auth.A.projectKey, 'the same project key: the refresh token key is the same')
+})
+
+test('0.1.0 kept the pasted secret in ctx.secrets: load moves it into storage and deletes the old key', async () => {
+  const secrets = fakeSecrets()
+  const storage = fakeStorage()
+  await storage.set('projectKey', '0123456789ab')
+  await storage.set('client', { clientId: CLIENT_ID })
+  await secrets.set(clientKey('0123456789ab', CLIENT_ID), CLIENT_SECRET)
+  await secrets.set(refreshKey('0123456789ab', CLIENT_ID), '1//old-refresh')
+  const a = make({ secrets, storage })
+  await a.auth.load(cfg())
+  assert.equal(a.auth.client().clientSecret, CLIENT_SECRET)
+  assert.deepEqual(await storage.get('client'), { clientId: CLIENT_ID, clientSecret: CLIENT_SECRET })
+  assert.deepEqual(await secrets.keys(), [refreshKey('0123456789ab', CLIENT_ID)], 'the sign-in stays, signed in as before')
+  assert.equal(a.auth.status().signedIn, true)
+  assert.ok(a.logs.some((m) => /moved the pasted OAuth client/.test(m)))
+})
+
+test('0.1.0, after an uninstall: only the id is left; reported, not used, and removable', async () => {
+  const storage = fakeStorage()
+  await storage.set('client', { clientId: CLIENT_ID })
+  const c = make({ storage })
   await c.auth.load(cfg())
   assert.equal(c.auth.client(), null)
-  assert.match(c.auth.status().pastedBroken, /gone from the keychain/)
+  assert.match(c.auth.status().pastedBroken, /secret is gone .*paste the client file again; from now on it survives a reinstall/)
   assert.deepEqual(await c.auth.removeClient(), { ok: true, changed: false })
   assert.equal(c.auth.status().pastedBroken, null)
 })
 
-test('a refused keychain write leaves the old client in place', async () => {
-  const { auth, secrets } = make()
+test('a refused storage write leaves the old client in place', async () => {
+  const storage = fakeStorage()
+  const { auth } = make({ storage })
   await auth.load(cfg(SETTINGS_CLIENT))
-  secrets.failSet = 'locked'
+  storage.set = async () => {
+    throw new Error('disk full')
+  }
   const r = await auth.pasteClient(FILE)
   assert.equal(r.ok, false)
-  assert.match(r.error, /could not be stored: locked/)
+  assert.match(r.error, /could not be stored: disk full/)
   assert.equal(auth.client().source, 'settings')
+})
+
+test('signed in, then uninstalled: the client stays and the panel says why the sign-in is gone', async () => {
+  const a = make()
+  await a.auth.load(cfg())
+  await a.auth.pasteClient(FILE)
+  await a.auth.signIn()
+  assert.deepEqual(await a.storage.get('signedIn'), { client: sha(CLIENT_ID, 12) })
+  const b = make({ secrets: fakeSecrets(), storage: a.storage })
+  await b.auth.load(cfg())
+  const st = b.auth.status()
+  assert.equal(st.signedIn, false)
+  assert.equal(st.client.source, 'pasted')
+  assert.match(st.signedOutReason, /sign-in of this project is gone: cc-cockpit deletes a plugin's keychain entries when it is uninstalled/)
+  // A sign out forgets that it was signed in.
+  await a.auth.signOut()
+  assert.equal(await a.storage.get('signedIn'), undefined)
+  const c = make({ secrets: fakeSecrets(), storage: a.storage })
+  await c.auth.load(cfg())
+  assert.equal(c.auth.status().signedOutReason, null)
 })
 
 test('sign in: the spec, the refresh token stored, the access token kept in memory', async () => {

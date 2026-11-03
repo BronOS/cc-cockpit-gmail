@@ -59,6 +59,9 @@ function labelNames(ids, names = {}) {
  * @param {Record<string,string>} [o.labels] label id -> name
  * @param {string} [o.note] a line shown above the messages (an alert group, a cut)
  * @param {boolean} [o.aside] build the details column
+ * @param {string} [o.tail] html that follows the messages (the "Jira issue" section, 0.2.0); its bytes
+ *   count against the budget first, so the oldest messages give way rather than the cut falling in it
+ * @param {string} [o.asideTail] html added to the end of the details column (the issue's facts)
  * @returns {{ html: string, aside?: string, omitted: number, remoteImages: number }}
  */
 function threadDocument(o) {
@@ -78,7 +81,8 @@ function threadDocument(o) {
   parts.push(head)
   if (o.note) parts.push(`<p class="muted"><em>${esc(o.note)}</em></p>`)
   if (remoteImages) parts.push(`<p class="muted">${remoteImages} remote picture${remoteImages === 1 ? ' is' : 's are'} shown as a link: the plugin never loads pictures from the web (they can tell the sender you read the mail).</p>`)
-  const fixed = bytes(parts.join('\n')) + 2000
+  const tail = typeof o.tail === 'string' && o.tail ? o.tail : ''
+  const fixed = bytes(parts.join('\n')) + bytes(tail) + 2000
   let room = HTML_MAX_BYTES - fixed
   const kept = []
   for (let i = cards.length - 1; i >= 0; i--) {
@@ -90,8 +94,12 @@ function threadDocument(o) {
   const omitted = cards.length - kept.length
   if (omitted) parts.push(`<p><em>${omitted} earlier message${omitted === 1 ? ' is' : 's are'} not shown here (too long together); Gmail has ${omitted === 1 ? 'it' : 'them'}.</em></p>`)
   parts.push(...kept)
+  if (tail) parts.push(tail)
   const out = { html: parts.join('\n'), omitted, remoteImages }
-  if (o.aside) out.aside = threadDetails(facts, o.url, o.labels)
+  if (o.aside) {
+    out.aside = threadDetails(facts, o.url, o.labels)
+    if (o.asideTail && out.aside.length + o.asideTail.length <= ASIDE_MAX) out.aside += o.asideTail
+  }
   return out
 }
 

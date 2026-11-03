@@ -13,6 +13,9 @@ read, archives, labels or sends. Opening a thread here does not mark it read in 
 - **Discuss with Claude**: click a row and the thread opens in the reviewer overlay as a clean
   page (every message as a card, its pictures, its attachments listed), where you select text to
   add notes and press Discuss (the Claude tab you are looking at) or New session.
+- **Jira mail** (0.2.0, with the [Jira plugin](https://github.com/BronOS/cc-cockpit-jira) enabled in
+  the project): a mail from Jira gets triage hints from the issue's real status, and opening it shows
+  the issue beside the mail (see "Jira mail").
 - `ccc gmail ...` from any tab of the project.
 
 Each project signs in on its own: a work project and a personal project can use different Google
@@ -30,6 +33,8 @@ accounts.
   someone else's app.
 - **Jev triage (`bronos.jev-triage`) for sorting**, which in turn needs the Jev plugin
   (`bronos.jev`). Without it the lanes work unsorted and the panel says triage is off.
+- **Optional: the Jira plugin (`bronos.jira` 0.5.0 or later)** for the Jira mail features. Without it
+  (or with it off or not configured in the project) everything works as before.
 - What opening a thread shows, by reviewer:
   - the bundled reviewer of 0.9.1: the clean page with its pictures, a details column, notes,
     Discuss and New session;
@@ -89,6 +94,14 @@ each console page.
 The same file works for several projects (each signs in on its own). To stop: **Sign out** in the
 panel (or `ccc gmail logout`) deletes the stored sign-in; to revoke the app at Google:
 <https://myaccount.google.com/connections>.
+
+**Uninstalling and installing again** (or switching from a linked copy to the Marketplace one):
+cc-cockpit deletes a plugin's keychain entries when it is uninstalled, on purpose, so the Google
+sign-in is gone and you press **Sign in with Google** once more; the panel says why. Since 0.2.0 a
+pasted client file is kept with the plugin's project storage, which an uninstall keeps, so you do
+not paste it again (a client from 0.1.0 is moved there the first time 0.2.0 starts; one already
+lost to an uninstall under 0.1.0 has to be pasted once more). A client secret entered in the
+settings field is a keychain entry too and goes with an uninstall.
 
 ## Settings (per project)
 
@@ -178,10 +191,44 @@ Other attachments are listed by name and size (no download in this version; open
 Gmail for them). The page is at most 2 MB of HTML: when a long thread does not fit, the oldest
 messages give way, with a line saying how many.
 
+## Jira mail
+
+With the Jira plugin (`bronos.jira` 0.5.0+) enabled and configured in the same project, the Gmail
+plugin asks it, through its `jira` service, which addresses Jira mails come from (`jira@<your site's
+host>`, or the Jira plugin's `mailSenders` setting) and what an issue's status is now. Nothing here
+talks to Jira itself, and nothing needs setting up in the Gmail plugin.
+
+- **Which mail**: a message from one of those addresses. Its issue is the first issue key in the
+  subject (`ABC-123`), else the first link to `<your site>/browse/ABC-123` in the mail.
+- **Triage hints**, for an unread thread, judged on its new messages:
+
+  | When | Then |
+  |---|---|
+  | every new message is Jira's and only moves the issue ("moved a work item") | noise: the Jira panel ranks the issue by its real status |
+  | a new Jira message is about an issue that is Done now | fyi: even a mention there is to read, not to do |
+  | every new message is Jira's and only mentions you on, or creates, an open issue assigned to you | at least action (Jev may say urgent) |
+  | anything else | Jev decides, as for any mail |
+
+  The issue key also goes to jev-triage as the field `jira`, for rules. The status is looked up
+  (at most 10 issues a poll, cached for 10 minutes, asked again when a newer mail about the issue
+  arrives); a poll waits at most 4 s for those answers, and a row whose answer comes later is
+  judged again then.
+- **The thread view**: with cc-cockpit 0.9.3 or later, the issue as the Jira plugin shows it
+  (description, comments, attachments and their pictures) opens **beside the mail**: two columns,
+  the mail left and the issue right, each scrolling on its own under a header row that stays put:
+  **Mail** with an **Open in Gmail ↗** button, **Jira · ABC-123** with **Open in Jira ↗**, and each
+  one's key fields (the issue's status, priority, assignee); a divider you can drag, the issue below
+  the mail when the overlay is narrow. Notes go on either, and Claude is told which one each is about. With an
+  older reviewer, the issue is a **Jira issue ABC-123** section below the mail instead, with its
+  status, priority and assignee added to the details column (at most 800 KB of the page there).
+  The pictures are one budget in the reviewer either way (the issue: 7 pictures, the mail: 8).
+  When the issue cannot be shown (Jira unreachable, slow past 15 s, busy), the mail shows alone
+  with a short note.
+
 ## CLI
 
 ```
-ccc gmail status            client, account, last poll, counts per lane, errors
+ccc gmail status            client, account, last poll, counts per lane, Jira mail on/off, errors
 ccc gmail refresh           poll Gmail now and print the counts
 ccc gmail list [lane]       unread, alerts, read
 ccc gmail show <id>         a thread as readable text (alert:<name> for an alert group)
@@ -197,8 +244,13 @@ ccc gmail help
   `oauth2.googleapis.com`), the mail through `gmail.googleapis.com`. The access token is sent to
   nothing else and never follows a redirect. Tokens and the client secret are never logged, shown
   in the panel or printed by `ccc gmail`.
-- The refresh token and the client secret are stored in the OS keychain (cc-cockpit's secrets
-  store), under a key of this project and client. The access token stays in memory.
+- The refresh token is stored in the OS keychain (cc-cockpit's secrets store), under a key of this
+  project and client. The access token stays in memory. A pasted client file (its id and secret)
+  is kept in the plugin's storage for this project, a file only your user can read: Google does not
+  treat a Desktop app client's secret as confidential (an installed app cannot keep one), and kept
+  there it survives a reinstall. A client secret entered in the settings stays in the keychain.
+- With the Jira plugin: issue keys go to it (on this machine) for their status; the issue text it
+  sends back is shown in the thread view, and is not sent to triage.
 - With `triageText: full` (the default) the sender, recipients, subject and Gmail's snippets (the
   short preview Gmail shows in its list) of the newest message and up to 3 earlier ones of the
   threads in the shown lanes, never the full bodies, go to

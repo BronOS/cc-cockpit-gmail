@@ -207,7 +207,7 @@ function fakeCtx(opts = {}) {
   const actionListeners = []
   const settingsListeners = []
   const dataDir = opts.dataDir || tmpDir()
-  const services = { triage: opts.triage || null, reviewer: opts.reviewer || null }
+  const services = { triage: opts.triage || null, reviewer: opts.reviewer || null, jira: opts.jira || null }
   const ctx = {
     api: 1,
     pluginId: 'bronos.gmail',
@@ -385,4 +385,45 @@ function fakeTriage() {
   return t
 }
 
-module.exports = { fakeGmail, fakeOAuth, fakeSecrets, fakeStorage, fakeCtx, fakeTriage, tokens, fixture, tmpDir, picture, json, API, ME, NOW, T, CLIENT_ID, CLIENT_SECRET, SETTINGS_CLIENT }
+const JIRA_SITE = 'https://acme.atlassian.net'
+
+/**
+ * A fake bronos.jira `jira` service (v1): `issues` key -> what issue() answers (merged over a
+ * default open issue), `docs` key -> extra fields of document()'s answer. `issueDelay` / `docDelay`
+ * (ms), `docError` (document rejects with it), `site` (what site() answers). Records every call.
+ */
+function fakeJiraService(opts = {}) {
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+  const j = {
+    calls: [],
+    issues: opts.issues || {},
+    async site() {
+      j.calls.push(['site'])
+      return opts.site || { ready: true, site: JIRA_SITE, senders: ['jira@acme.atlassian.net'], account: { accountId: 'acc-1', displayName: 'Oleg Example' } }
+    },
+    async issue(key, o) {
+      j.calls.push(['issue', key, o])
+      if (opts.issueDelay) await sleep(opts.issueDelay)
+      const i = j.issues[key]
+      if (!i) throw new Error(`jira: issue ${key}: Issue does not exist or you do not have permission to see it.`)
+      return { key, summary: `Summary of ${key}`, status: 'In Progress', category: 'indeterminate', done: false, priority: 'High', type: 'Bug', assignee: 'Oleg Example', mine: true, lane: 'inProgress', url: `${JIRA_SITE}/browse/${key}`, updatedAt: 0, source: 'poll', at: 0, ...i }
+    },
+    async document(key, o) {
+      j.calls.push(['document', key, o])
+      if (opts.docDelay) await sleep(opts.docDelay)
+      if (opts.docError) throw new Error(opts.docError)
+      return {
+        key,
+        title: `${key}: Summary of ${key}`,
+        url: `${JIRA_SITE}/browse/${key}`,
+        html: `<div class="card"><h1>${key}: Summary of ${key}</h1></div>\n<h2>Description</h2>\n<p>The issue text of ${key}.</p>\n<p><img data-asset="att501" alt="shot.png"></p>`,
+        aside: '<dl class="facts"><dt>Status</dt><dd>In Progress</dd></dl>',
+        assets: [{ id: 'att501', name: 'shot.png', mime: 'image/png', dataUrl: `data:image/png;base64,${picture('png', 30).toString('base64')}` }],
+        ...((opts.docs && opts.docs[key]) || {}),
+      }
+    },
+  }
+  return j
+}
+
+module.exports = { fakeJiraService, JIRA_SITE, fakeGmail, fakeOAuth, fakeSecrets, fakeStorage, fakeCtx, fakeTriage, tokens, fixture, tmpDir, picture, json, API, ME, NOW, T, CLIENT_ID, CLIENT_SECRET, SETTINGS_CLIENT }

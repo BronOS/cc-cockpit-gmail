@@ -2,13 +2,24 @@
 // The Google sign-in of one project (design "Auth (per project)"): which OAuth client is in use,
 // the refresh token in ctx.secrets, the access token in memory only.
 //
-// - The client: a pasted client file wins over the settings fields until it is removed. Its id is
-//   kept in ctx.storage (not secret), its secret in ctx.secrets, never in a plain setting.
+// - The client: a pasted client file wins over the settings fields until it is removed. Since 0.2.0
+//   it is kept whole (id and secret) in this project's ctx.storage, so it survives an uninstall and
+//   a reinstall: cc-cockpit deletes a plugin's ctx.secrets on uninstall (on purpose: no credential
+//   outlives the plugin) but keeps its ctx.storage. A Desktop app client's secret is not a secret in
+//   Google's own terms (an installed app cannot keep one; Google's docs say so, and the downloaded
+//   file sits in plain text in the person's Downloads), unlike the refresh token, which stays in
+//   ctx.secrets. 0.1.0 kept the client's secret in ctx.secrets under `client:<projectKey>:<...>`;
+//   load() moves one it finds into the storage record and deletes the old key.
 // - ctx.secrets is app-wide while accounts are per project (a personal and a work project use
-//   different Google accounts), so every key carries a project key and the client:
-//   `refresh:<projectKey>:<sha256(clientId) 12>` and `client:<projectKey>:<sha256(clientId) 12>`.
-//   The project key is a random id kept in this project's ctx.storage: it survives a moved folder
-//   and names nothing about the project. A key is 41 characters, under the 128 the app allows.
+//   different Google accounts), so the refresh token's key carries a project key and the client:
+//   `refresh:<projectKey>:<sha256(clientId) 12>`. The project key is a random id kept in this
+//   project's ctx.storage: per project (each project has its own storage), kept over an uninstall
+//   with the rest of the storage, and naming nothing about the project. Nothing in ctx is steadier:
+//   ctx.storage and ctx.dataDir both follow the app's project id (a hash of the folder's real path),
+//   and ctx.projectDir is the path itself. A key is 41 characters, under the 128 the app allows.
+// - The refresh token cannot survive an uninstall (the app deletes it with the other secrets). A
+//   storage marker (`signedIn`: the client's hash) remembers that this project was signed in, so
+//   after a reinstall the panel says why the sign-in is gone instead of showing a first setup.
 // - The access token is refreshed through ctx.oauth.refresh a minute before `expiresAt`, one
 //   refresh at a time (the app allows 4 in flight; a burst of thread reads must not spend them).
 // - `invalid_grant` from Google = signed out: the refresh token is deleted and the reason kept for
@@ -26,6 +37,10 @@ const { oauthSpec, parseClientFile, shortClientId } = require('./oauth-client')
 const { sha } = require('./util')
 
 const EARLY_MS = 60000 // refresh this long before the access token expires (clock skew, a slow call)
+
+const GONE_TEXT =
+  'The stored Google sign-in of this project is gone: cc-cockpit deletes a plugin\'s keychain entries when it is uninstalled. ' +
+  'Your OAuth client is kept: press Sign in with Google again.'
 
 const INVALID_GRANT_TEXT =
   'Google no longer accepts the stored sign-in (invalid_grant). Sign in again. ' +
@@ -51,7 +66,7 @@ function isInvalidGrant(err) {
 function refreshKey(projectKey, clientId) {
   return `refresh:${projectKey}:${sha(clientId, 12)}`
 }
-/** The ctx.secrets key of a pasted client's secret in a project. */
+/** The ctx.secrets key where 0.1.0 kept a pasted client's secret (moved to ctx.storage since 0.2.0). */
 function clientKey(projectKey, clientId) {
   return `client:${projectKey}:${sha(clientId, 12)}`
 }
@@ -103,17 +118,39 @@ function createAuth(o) {
     await ensureProjectKey()
     const stored = await o.storage.get('client').catch(() => undefined)
     if (stored && typeof stored.clientId === 'string') {
-      let secret = null
-      try {
-        secret = await o.secrets.get(clientKey(A.projectKey, stored.clientId))
-      } catch (e) {
-        A.pastedBroken = `the pasted client's secret cannot be read: ${e.message}`
+      if (typeof stored.clientSecret === 'string' && stored.clientSecret) {
+        A.pasted = { clientId: stored.clientId, clientSecret: stored.clientSecret }
+      } else {
+        // 0.1.0 kept the secret in ctx.secrets: move it into the storage record (then it survives an uninstall).
+        let secret = null
+        try {
+          secret = await o.secrets.get(clientKey(A.projectKey, stored.clientId))
+        } catch (e) {
+          A.pastedBroken = `the pasted client's secret cannot be read: ${e.message}`
+        }
+        if (secret) {
+          A.pasted = { clientId: stored.clientId, clientSecret: secret }
+          try {
+            await o.storage.set('client', { clientId: stored.clientId, clientSecret: secret })
+            await o.secrets.delete(clientKey(A.projectKey, stored.clientId)).catch(() => {})
+            o.log.info('moved the pasted OAuth client from the keychain to the plugin storage (it survives a reinstall now)')
+          } catch (e) {
+            o.log.warn(`moving the pasted client to the plugin storage failed, kept in the keychain: ${e.message}`)
+          }
+        } else if (!A.pastedBroken) {
+          A.pastedBroken = 'the pasted client\'s secret is gone (an uninstall deletes the keychain entries where version 0.1.0 kept it): paste the client file again; from now on it survives a reinstall'
+        }
       }
-      if (secret) A.pasted = { clientId: stored.clientId, clientSecret: secret }
-      else if (!A.pastedBroken) A.pastedBroken = 'the pasted client\'s secret is gone from the keychain: paste the client file again'
     }
     applySettings(settingsCfg)
     await checkRefresh()
+    // Signed in before, and the refresh token is gone: the plugin was uninstalled (or the keychain was
+    // reset). Say so instead of looking like a first setup.
+    const c = client()
+    if (c && !A.hasRefresh && !A.signedOutReason) {
+      const mark = await o.storage.get('signedIn').catch(() => undefined)
+      if (mark && mark.client === sha(c.clientId, 12)) A.signedOutReason = GONE_TEXT
+    }
   }
 
   function applySettings(cfg) {
@@ -143,6 +180,7 @@ function createAuth(o) {
   async function dropSignIn(clientId) {
     A.access = null
     A.hasRefresh = false
+    await o.storage.delete('signedIn').catch(() => {})
     if (clientId && A.projectKey) await o.secrets.delete(refreshKey(A.projectKey, clientId)).catch((e) => o.log.warn(`deleting the stored sign-in failed: ${e.message}`))
   }
 
@@ -166,23 +204,24 @@ function createAuth(o) {
 
   /**
    * A pasted client file (the panel's box or `ccc gmail client`). Returns `{ ok, changed, error?,
-   * clientId? }`. The secret goes to ctx.secrets first: when the keychain refuses, nothing changes.
+   * clientId? }`. Kept whole in ctx.storage (see the top of this file); when the store refuses,
+   * nothing changes.
    */
   async function pasteClient(text) {
     const p = parseClientFile(text)
     if (!p.ok) return { ok: false, error: p.error }
     await ensureProjectKey()
+    const stored = await o.storage.get('client').catch(() => undefined)
     try {
-      await o.secrets.set(clientKey(A.projectKey, p.clientId), p.clientSecret)
+      await o.storage.set('client', { clientId: p.clientId, clientSecret: p.clientSecret })
     } catch (e) {
-      return { ok: false, error: `The client secret could not be stored: ${e.message}` }
+      return { ok: false, error: `The client could not be stored: ${e.message}` }
     }
     const before = client()
-    const oldPasted = A.pasted
-    await o.storage.set('client', { clientId: p.clientId })
     A.pasted = { clientId: p.clientId, clientSecret: p.clientSecret }
     A.pastedBroken = null
-    if (oldPasted && oldPasted.clientId !== p.clientId) await o.secrets.delete(clientKey(A.projectKey, oldPasted.clientId)).catch(() => {})
+    // A 0.1.0 copy of the secret in the keychain is not needed any more.
+    if (stored && typeof stored.clientId === 'string') await o.secrets.delete(clientKey(A.projectKey, stored.clientId)).catch(() => {})
     const changed = !before || before.clientId !== p.clientId
     if (changed) {
       if (before) await dropSignIn(before.clientId)
@@ -199,7 +238,7 @@ function createAuth(o) {
     const before = client()
     const stored = await o.storage.get('client').catch(() => undefined)
     const id = A.pasted ? A.pasted.clientId : stored && stored.clientId
-    if (id) await o.secrets.delete(clientKey(A.projectKey, id)).catch(() => {})
+    if (id) await o.secrets.delete(clientKey(A.projectKey, id)).catch(() => {}) // a 0.1.0 copy
     await o.storage.delete('client').catch(() => {})
     A.pasted = null
     A.pastedBroken = null
@@ -248,6 +287,7 @@ function createAuth(o) {
         await ensureProjectKey()
         await o.secrets.set(refreshKey(A.projectKey, c.clientId), tokens.refreshToken)
         A.hasRefresh = true
+        await o.storage.set('signedIn', { client: sha(c.clientId, 12) }).catch(() => {})
       } catch (e) {
         // The keyring is locked or missing: no file fallback (by design); signed in for now.
         o.log.warn(`storing the sign-in failed, signed in until the access token expires: ${e.message}`)
@@ -337,4 +377,4 @@ function createAuth(o) {
   return { A, load, client, settingsChanged, pasteClient, removeClient, signIn, signOut, token, invalidate, status, ensureProjectKey }
 }
 
-module.exports = { createAuth, AuthError, isInvalidGrant, refreshKey, clientKey, INVALID_GRANT_TEXT, EARLY_MS }
+module.exports = { createAuth, AuthError, isInvalidGrant, refreshKey, clientKey, INVALID_GRANT_TEXT, GONE_TEXT, EARLY_MS }

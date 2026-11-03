@@ -7,9 +7,11 @@
 //   person is in To, in Cc or neither: a list, a group address), the subject, up to three earlier
 //   messages of the thread as context (sender + snippet), then the newest message marked as new.
 //   `summary`: from and subject only (for an employer that objects to mail text leaving).
-// - hints: every Grafana alert group is noise (the old connector's rule). Its Jira-mail hints
-//   (an issue moved = noise, about a Done issue = fyi, a mention on my open issue = action) need
-//   Jira lookups and are left out of v1. A plain mail from an alert sender has no hint: Jev judges it.
+// - hints: every Grafana alert group is noise (the old connector's rule). A plain mail from an alert
+//   sender has no hint: Jev judges it. Mail from Jira (0.2.0, with the bronos.jira plugin's `jira`
+//   service): the host passes what lib/jira.js decided (an issue moved = hint noise, about a Done issue
+//   = hint fyi, a mention on or creation of my open issue = floor action) and the issue key, which
+//   goes into `fields.jira` so jev-triage rules can match it. Without Jira the item is as in 0.1.0.
 
 const { cut, oneLine } = require('./util')
 const { addressedTo } = require('./model')
@@ -62,8 +64,10 @@ function alertText(g, mode) {
  * @param {object} row poll.buildView's row
  * @param {'full'|'summary'} mode
  * @param {string} me the person's address
+ * @param {{ key?: string|null, hint?: { priority: string }, floor?: string }|null} [jira] a Jira mail's
+ *   key and hint (lib/jira.js), null for any other mail
  */
-function triageItem(row, mode, me) {
+function triageItem(row, mode, me, jira) {
   if (row.kind === 'alert') {
     const g = row.group
     return {
@@ -74,11 +78,17 @@ function triageItem(row, mode, me) {
     }
   }
   const lead = row.facts.lead
-  return {
+  const item = {
     id: row.id,
     text: threadText(row, mode, me),
     fields: { from: lead.address || '', to: cut(lead.to, CUTS.field), lane: row.lane, list: cut(lead.listId, CUTS.field) },
   }
+  if (jira) {
+    if (jira.key) item.fields.jira = jira.key
+    if (jira.hint) item.hint = { priority: jira.hint.priority }
+    else if (jira.floor) item.floor = jira.floor
+  }
+  return item
 }
 
 module.exports = { triageItem, threadText, alertText, TO_TEXT }

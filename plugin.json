@@ -1,10 +1,10 @@
 {
   "id": "bronos.gmail",
   "name": "Gmail",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "api": 1,
   "main": "dist/host.js",
-  "description": "Your Gmail in lanes (Unread, Alerts, Read), Grafana alerts grouped, sorted by Jev triage, a thread opened as a clean page to discuss with Claude. Read-only: it never changes your mailbox.",
+  "description": "Your Gmail in lanes (Unread, Alerts, Read), Grafana alerts grouped, sorted by Jev triage, a thread opened as a clean page to discuss with Claude, Jira mail with its issue (with bronos.jira). Read-only: it never changes your mailbox.",
   "author": "Oleg Bronzov",
   "license": "MIT",
   "contributes": {
@@ -126,7 +126,8 @@
   "services": {
     "uses": {
       "triage": 1,
-      "reviewer": 1
+      "reviewer": 1,
+      "jira": 1
     }
   }
 }

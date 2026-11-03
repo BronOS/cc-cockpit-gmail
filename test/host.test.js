@@ -101,17 +101,14 @@ test('an older app (no ctx.oauth, secrets, header, openExternal): the panel and 
   await h.stop()
 })
 
-test('pasting the client file: the secret goes to ctx.secrets, the id to storage, never into a post', async () => {
+test('pasting the client file: kept in this project\'s storage (it survives a reinstall), never in a post', async () => {
   const { ctx, h } = boot()
   await ctx.sendPanel({ type: 'client', text: CLIENT_FILE })
   const st = ctx.lastState()
   assert.equal(st.auth.client.source, 'pasted')
   assert.match(st.notice.text, /Client saved .*Next: Sign in with Google/)
-  const key = (await ctx.secrets.keys()).find((k) => k.startsWith('client:'))
-  assert.match(key, /^client:[a-f0-9]{12}:[a-f0-9]{12}$/)
-  assert.equal(await ctx.secrets.get(key), CLIENT_SECRET)
-  assert.deepEqual(await ctx.storage.get('client'), { clientId: CLIENT_ID })
-  assert.ok(!JSON.stringify([...ctx.storage.map.entries()]).includes(CLIENT_SECRET))
+  assert.deepEqual(await ctx.storage.get('client'), { clientId: CLIENT_ID, clientSecret: CLIENT_SECRET })
+  assert.ok(!(await ctx.secrets.keys()).some((k) => k.startsWith('client:')))
   assert.ok(!everythingSaid(ctx).includes(CLIENT_SECRET))
   await h.stop()
 })
@@ -315,7 +312,7 @@ test('sign out deletes the stored sign-in and empties the lanes', async () => {
   assert.equal(st.auth.signedIn, false)
   assert.equal(st.lanes.length, 0)
   assert.equal(st.account, '')
-  assert.ok(await b.ctx.secrets.get((await b.ctx.secrets.keys()).find((k) => k.startsWith('client:'))), 'the client stays')
+  assert.equal((await b.ctx.storage.get('client')).clientId, CLIENT_ID, 'the client stays')
   await b.h.stop()
 })
 
@@ -347,7 +344,7 @@ test('a pasted client wins over the settings fields until it is removed', async 
   const st = b.ctx.lastState()
   assert.equal(st.auth.client.source, 'settings')
   assert.equal(st.auth.signedIn, false, 'another client: signed out')
-  assert.ok(!(await b.ctx.secrets.keys()).some((k) => k.startsWith('client:')))
+  assert.equal(await b.ctx.storage.get('client'), undefined)
   await b.h.stop()
 })
 
@@ -360,14 +357,12 @@ test('a client secret only in the settings, without its id, is reported missing'
   await b.h.stop()
 })
 
-test('a locked keyring: the client paste says so; a sign-in lasts only the session and says that', async () => {
+test('a locked keyring: the client paste works (storage); a sign-in lasts only the session and says that', async () => {
   const b = boot()
   await b.h.ready
   b.ctx.secrets.failSet = 'cannot store secrets: no Secret Service on the session bus'
   await b.ctx.sendPanel({ type: 'client', text: CLIENT_FILE })
-  assert.match(b.ctx.lastState().clientError, /cannot store secrets/)
-  b.ctx.secrets.failSet = null
-  await b.ctx.sendPanel({ type: 'client', text: CLIENT_FILE })
+  assert.equal(b.ctx.lastState().clientError, null)
   b.ctx.secrets.failSet = 'cannot store secrets: locked'
   await b.ctx.sendPanel({ type: 'signIn' })
   await until(() => b.h.S.cache && b.h.S.cache.lastPoll)

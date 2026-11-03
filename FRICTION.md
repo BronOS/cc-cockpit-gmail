@@ -37,10 +37,19 @@ same for the reviewer refusing the HTML mode (the plugin falls back to text and 
   login` say a sign-in is already open (it gives up after 5 minutes). Would help: an `AbortSignal`
   in `authorize`.
 
-- **Uninstall deletes `ctx.secrets` but keeps `ctx.storage`.** Noted (documented in `api`).
-  A reinstall finds the pasted client's id in storage without its secret. Did: the panel and
-  `ccc gmail status` say the secret is gone and to paste the file again; the stale record is
-  replaced or removed.
+- **Uninstall deletes `ctx.secrets` but keeps `ctx.storage`.** Worked around in 0.2.0 (by design in the app).
+  Found in real use (2026-11-03): after an uninstall and a Marketplace install the pasted client and
+  the sign-in were gone. The cause is not the project key (`projectKey` is in `ctx.storage`, which an
+  uninstall keeps, and it is per project already: nothing in `ctx` is steadier, since `ctx.storage`
+  and `ctx.dataDir` both follow the app's project id and `ctx.projectDir` is the folder path) but the
+  app deleting every `ctx.secrets` key of the plugin on uninstall (`installer.ts`: no credential
+  outlives the plugin), the 0.1.0 client secret and the refresh token with them. A secret settings
+  field (`clientSecret`) goes the same way. Did: the pasted client (id and secret) is kept in
+  `ctx.storage` since 0.2.0 (a Desktop app client's secret is not confidential in Google's own terms;
+  0.1.0's keychain copy is moved on load), so it survives; the refresh token stays in `ctx.secrets`
+  and cannot survive, so a storage marker lets the panel say "the sign-in is gone, sign in again"
+  after a reinstall. Would help: the guide saying that a reinstall needs a new sign-in by design, or
+  an uninstall option "keep this plugin's secrets" for a reinstall or an update by hand.
 
 ## Tooling
 
@@ -51,3 +60,20 @@ same for the reviewer refusing the HTML mode (the plugin falls back to text and 
   (`loadManifest`, `compileSettingsSchema`, `validateSettings`) with the app repo's esbuild into a
   scratch script and ran it on this folder; `test/manifest.test.js` repeats the rules that matter.
   Would help: `ccc plugin validate <dir>` (works with the app closed, like `ccc guide`).
+
+## Jira mail (0.2.0, the bronos.jira `jira` service), 2026-11-03
+
+- **`api`: a service call cannot be cancelled, and has no timeout.** Open (also in bronos.jira's FRICTION.md).
+  Needed: a poll that never waits long for Jira, and a thread view that opens even when the Jira
+  plugin is slow. Guide: "No timeout: race your own"; an `AbortSignal` is not plain data. Did: every
+  call is raced (2 s for `site()`, 4 s for a round of lookups, 15 s for the issue below the mail); a
+  lookup that lands late re-judges its rows; the provider's work goes on unseen after a race is lost.
+
+- **`api`: no event when the provider's answers change.** Noted.
+  Needed: re-judge a Jira mail when its issue moves to Done. Did: the lookups have a TTL (10 min) and
+  are asked again when a newer mail about the issue arrives (a status change sends one); the
+  service has no events in v1.
+
+- **`reviewer`: the issue could only go below the mail.** Fixed in cc-cockpit 0.9.3 (annotate's
+  `companion` and `features()`). Needed: read the mail and its issue side by side, notes on both.
+  Did: the issue goes beside the mail when `features()` lists `companion`, below it otherwise.
