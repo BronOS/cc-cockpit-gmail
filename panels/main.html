@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Gmail</title>
+    <!-- The panel CSP allows script from this plugin's own files only (no inline script), so the
+      logic lives in main.js. The SDK gives the page `ccPanel` and the app theme variables. Every
+      action is a button: a panel cannot submit a <form> (sandboxed without allow-forms). The title
+      bar (last poll, account, refresh) is drawn by the app from the host's ctx.panels.header. -->
+    <script src="/__sdk/panel.js"></script>
+    <script src="rowlogic.js" defer></script>
+    <script src="main.js" defer></script>
+    <style>
+      body { margin: 0; padding: 10px; font: 12px/1.4 system-ui, sans-serif; background: var(--cc-bg); color: var(--cc-fg); }
+      button { font: inherit; color: inherit; background: var(--cc-bg-menu); border: 1px solid var(--cc-border); border-radius: 4px; padding: 1px 6px; cursor: pointer; }
+      button:hover { border-color: var(--cc-border-strong); }
+      button:focus-visible, textarea:focus-visible { outline: 2px solid var(--cc-focus); outline-offset: 1px; }
+      button:disabled { opacity: 0.6; cursor: default; }
+      button.primary { background: var(--cc-accent); color: var(--cc-accent-fg); border-color: var(--cc-accent); padding: 3px 10px; }
+      button.primary:hover { background: var(--cc-accent-hover); }
+      /* A link-looking button (a setup link, Sign out): the same quiet style as Show all. */
+      button.link { border: 0; background: none; padding: 0 2px; color: var(--cc-fg-muted); text-decoration: underline; }
+      button.link:hover { color: var(--cc-fg); }
+      .notice { background: var(--cc-bg-error); border: 1px solid var(--cc-border); border-radius: 4px; padding: 6px 8px; margin-bottom: 8px; display: flex; gap: 6px; align-items: flex-start; }
+      .notice.info { background: var(--cc-bg-banner); }
+      .notice .text { flex: 1; white-space: pre-wrap; overflow-wrap: anywhere; }
+      .notice .tabs { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+      .muted { color: var(--cc-fg-muted); }
+      /* The setup guide. */
+      .setup h2 { font-size: 13px; margin: 2px 0 6px; }
+      .setup ol { margin: 0 0 10px; padding-left: 20px; }
+      .setup li { margin: 0 0 6px; }
+      .setup .links { display: inline-flex; flex-wrap: wrap; gap: 4px; margin-left: 4px; }
+      .setup textarea { width: 100%; box-sizing: border-box; min-height: 90px; font: 11px/1.4 ui-monospace, monospace; background: var(--cc-surface-1); color: var(--cc-fg); border: 1px solid var(--cc-border); border-radius: 4px; padding: 6px; resize: vertical; }
+      .setup .row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin: 6px 0; }
+      .setup .client { padding: 6px 8px; border: 1px solid var(--cc-border); border-radius: 4px; background: var(--cc-surface-1); margin-bottom: 10px; }
+      .setup .waiting { color: var(--cc-fg-muted); font-style: italic; }
+      .setup .hint { margin-top: 6px; }
+      .setup .error { color: var(--cc-status-ended); white-space: pre-wrap; }
+      section { margin-bottom: 6px; }
+      .lane-head { display: flex; align-items: center; gap: 6px; width: 100%; text-align: left; background: var(--cc-surface-1); border: none; border-radius: 4px; padding: 3px 6px; font-weight: 600; }
+      .lane-head .count { color: var(--cc-fg-muted); font-weight: normal; }
+      .lane-head .chev { width: 10px; color: var(--cc-fg-subtle); }
+      /* The same quiet text button as cc-cockpit's Sessions panel (.session-files-more). */
+      .lane-more { display: block; margin: 2px 0 0; padding: 2px 6px; border: 0; border-radius: 4px; background: none; font-size: 0.92em; color: var(--cc-fg-muted); cursor: pointer; }
+      .lane-more:hover { color: var(--cc-fg); text-decoration: underline; }
+      ul.rows { list-style: none; margin: 0; padding: 0; }
+      li.row { position: relative; border-bottom: 1px solid var(--cc-border); padding: 4px 2px; cursor: pointer; border-radius: 3px; }
+      li.row:hover { background: var(--cc-surface-1); }
+      li.row:focus { outline: none; }
+      li.row:focus-visible { outline: 2px solid var(--cc-focus); outline-offset: -2px; }
+      .line { display: flex; gap: 6px; align-items: center; }
+      .from { flex: 0 1 auto; max-width: 40%; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--cc-fg-muted); }
+      .subject { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .age { flex: none; color: var(--cc-fg-subtle); font-size: 11px; }
+      .n { flex: none; font-size: 10px; color: var(--cc-fg-muted); }
+      /* Unread (Gmail's UNREAD label): an accent bar on the left, sender and subject in full strength. */
+      li.row.unread { box-shadow: inset 2px 0 0 var(--cc-accent); }
+      .unread .subject { font-weight: 600; }
+      .unread .from { color: var(--cc-fg); font-weight: 600; }
+      .sub { padding-left: 14px; color: var(--cc-fg-muted); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .pill { font-size: 10px; padding: 0 4px; border-radius: 3px; background: var(--cc-surface-3); color: var(--cc-fg); flex: none; }
+      .pill.firing { background: var(--cc-status-ended); color: var(--cc-accent-fg); }
+      /* The triage dot: the priority's colour, hollow below 0.5 confidence (as in the Jev triage panel). */
+      .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; border: 2px solid currentColor; background: currentColor; box-sizing: border-box; }
+      .dot.low { background: transparent; }
+      .dot.none { color: transparent; }
+      .p-urgent { color: var(--cc-status-ended); }
+      .p-action { color: var(--cc-status-needs-permission); }
+      .p-fyi { color: var(--cc-status-working); }
+      .p-noise { color: var(--cc-fg-subtle); }
+      /* The hover buttons: always in the DOM (so Tab reaches them), faded out until the row is
+         hovered or has the focus inside it; over the right end of the row's second line. */
+      .actions { position: absolute; right: 2px; bottom: 2px; display: flex; gap: 3px; padding: 1px 2px; background: var(--cc-surface-2); border-radius: 4px; box-shadow: 0 1px 3px var(--cc-shadow); opacity: 0; pointer-events: none; transition: opacity 80ms; }
+      li.row:hover .actions, li.row:focus-within .actions { opacity: 1; pointer-events: auto; }
+      .actions button { font-size: 10px; line-height: 15px; padding: 0 5px; }
+      .wrong button.current { outline: 1px solid var(--cc-accent); }
+      .wrong { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; margin: 2px 0 2px 14px; padding: 4px 6px; background: var(--cc-surface-2); border-radius: 4px; }
+      .empty { color: var(--cc-fg-muted); padding: 6px 2px; }
+      footer { margin-top: 10px; color: var(--cc-fg-subtle); font-size: 11px; }
+      code { font-family: ui-monospace, monospace; background: var(--cc-surface-2); padding: 0 3px; border-radius: 3px; }
+    </style>
+  </head>
+  <body>
+    <div id="notices"></div>
+    <div id="setup"></div>
+    <div id="lanes"></div>
+    <footer id="footer"></footer>
+  </body>
+</html>

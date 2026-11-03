@@ -1,0 +1,12 @@
+{
+  "error": {
+    "code": 429,
+    "message": "Too many concurrent requests for user.",
+    "errors": [
+      {
+        "reason": "rateLimitExceeded"
+      }
+    ],
+    "status": "RESOURCE_EXHAUSTED"
+  }
+}

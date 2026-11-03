@@ -1,0 +1,132 @@
+{
+  "id": "bronos.gmail",
+  "name": "Gmail",
+  "version": "0.1.0",
+  "api": 1,
+  "main": "dist/host.js",
+  "description": "Your Gmail in lanes (Unread, Alerts, Read), Grafana alerts grouped, sorted by Jev triage, a thread opened as a clean page to discuss with Claude. Read-only: it never changes your mailbox.",
+  "author": "Oleg Bronzov",
+  "license": "MIT",
+  "contributes": {
+    "panels": [
+      {
+        "id": "main",
+        "title": "Gmail",
+        "icon": "icons/gmail.svg",
+        "entry": "panels/main.html",
+        "defaultZone": "right"
+      }
+    ],
+    "settings": {
+      "project": {
+        "type": "object",
+        "properties": {
+          "clientId": {
+            "type": "string",
+            "title": "OAuth client ID",
+            "description": "The client ID of your own Google Cloud OAuth client (a Desktop app client), ending in .apps.googleusercontent.com. Or leave it empty and paste the client file in the Gmail panel: a pasted client wins. Changing it signs you out.",
+            "maxLength": 300,
+            "default": ""
+          },
+          "clientSecret": {
+            "type": "string",
+            "format": "secret",
+            "title": "OAuth client secret",
+            "description": "The client secret of the same Desktop app client (Google Cloud console > Google Auth Platform > Clients)."
+          },
+          "lanes": {
+            "type": "object",
+            "title": "Lanes",
+            "description": "Which lanes to show. A hidden lane is not fetched and never sent to triage. Alerts shows only with alert senders.",
+            "additionalProperties": false,
+            "properties": {
+              "unread": { "type": "boolean", "title": "Unread", "default": true },
+              "alerts": { "type": "boolean", "title": "Alerts (mail from the alert senders)", "default": true },
+              "read": { "type": "boolean", "title": "Read (the inbox of the last days)", "default": true }
+            },
+            "default": { "unread": true, "alerts": true, "read": true }
+          },
+          "rowsPerLane": {
+            "type": "integer",
+            "title": "Threads per lane",
+            "description": "How many threads a lane shows; the rest are behind Show all at the bottom of the lane.",
+            "minimum": 1,
+            "maximum": 300,
+            "default": 10
+          },
+          "unreadDays": {
+            "type": "integer",
+            "title": "Unread: days back",
+            "description": "How far back the Unread and Alerts lanes look.",
+            "minimum": 1,
+            "maximum": 365,
+            "default": 14
+          },
+          "maxUnread": {
+            "type": "integer",
+            "title": "Unread: threads fetched",
+            "description": "The newest unread threads read from Gmail (alerts are listed apart and do not count).",
+            "minimum": 1,
+            "maximum": 100,
+            "default": 15
+          },
+          "readDays": {
+            "type": "integer",
+            "title": "Read: days back",
+            "description": "How far back the Read lane looks in the inbox.",
+            "minimum": 1,
+            "maximum": 90,
+            "default": 2
+          },
+          "maxRead": {
+            "type": "integer",
+            "title": "Read: threads fetched",
+            "description": "The newest read inbox threads shown (alerts left out).",
+            "minimum": 1,
+            "maximum": 100,
+            "default": 10
+          },
+          "alertSenders": {
+            "type": "array",
+            "title": "Alert senders",
+            "description": "Addresses whose mail goes to the Alerts lane (Grafana alerts are grouped by alert name). Empty: no Alerts lane.",
+            "maxItems": 50,
+            "items": { "type": "string", "title": "Address", "maxLength": 254 },
+            "default": []
+          },
+          "pollMinutes": {
+            "type": "integer",
+            "title": "Poll every (minutes)",
+            "description": "Only while this project's window is open. A poll first asks Gmail whether anything changed, which costs almost nothing.",
+            "minimum": 1,
+            "maximum": 1440,
+            "default": 2
+          },
+          "triageText": {
+            "type": "string",
+            "title": "What triage reads",
+            "description": "Full: sender, recipients, subject and the snippets of the thread go to Jev (through Jev triage). Summary: only sender and subject, for employers who object to mail text leaving.",
+            "oneOf": [
+              { "const": "full", "title": "Full (sender, subject and snippets)" },
+              { "const": "summary", "title": "Summary only (sender and subject)" }
+            ],
+            "default": "full"
+          }
+        }
+      }
+    },
+    "cli": [
+      {
+        "name": "gmail",
+        "summary": "Gmail (read-only): status, refresh, list the lanes, show a thread, sign in or out, set the OAuth client",
+        "usage": "gmail status | refresh | list [lane] | show <threadId> | login | logout | client <file.json> | help"
+      }
+    ]
+  },
+  "services": {
+    "uses": {
+      "triage": 1,
+      "reviewer": 1
+    }
+  }
+}

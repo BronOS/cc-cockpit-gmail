@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Mail</title>
+    <!-- The plugin's reader: used when the reviewer has no annotate (an older reviewer) or no
+      reviewer is enabled. The thread as HTML the host built from the mail with its own sanitizer
+      (dist/lib/sanitize.js), its pictures as data: URLs (the page CSP allows data: images),
+      and three buttons; the host does the rest. -->
+    <script src="/__sdk/panel.js"></script>
+    <script src="thread.js" defer></script>
+    <style>
+      body { margin: 0; padding: 0 16px 16px; font: 13px/1.55 system-ui, sans-serif; background: var(--cc-bg); color: var(--cc-fg); }
+      header { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; position: sticky; top: 0; z-index: 1; background: var(--cc-bg); padding: 8px 0; border-bottom: 1px solid var(--cc-border); margin-bottom: 12px; }
+      header .grow { flex: 1; }
+      button { font: inherit; color: inherit; background: var(--cc-bg-menu); border: 1px solid var(--cc-border); border-radius: 4px; padding: 3px 8px; cursor: pointer; }
+      button:hover { border-color: var(--cc-border-strong); }
+      button:focus-visible { outline: 2px solid var(--cc-focus); outline-offset: 1px; }
+      button.primary { background: var(--cc-accent); color: var(--cc-accent-fg); border-color: var(--cc-accent); }
+      .muted { color: var(--cc-fg-muted); }
+      #doc { max-width: 920px; }
+      a { color: var(--cc-accent); }
+      h1 { font-size: 18px; margin: 0 0 6px; }
+      h2 { font-size: 15px; margin: 18px 0 8px; }
+      h3, h4, h5, h6 { font-size: 13.5px; margin: 14px 0 6px; }
+      pre { white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.5 ui-monospace, monospace; background: var(--cc-surface-1); padding: 8px 10px; border-radius: 6px; }
+      code { font-family: ui-monospace, monospace; font-size: 12px; background: var(--cc-surface-1); padding: 0 3px; border-radius: 3px; }
+      pre code { background: none; padding: 0; }
+      blockquote { margin: 8px 0; padding: 2px 12px; border-left: 3px solid var(--cc-border-strong); color: var(--cc-fg-muted); }
+      table { border-collapse: collapse; margin: 8px 0; }
+      th, td { border: 1px solid var(--cc-border); padding: 4px 8px; text-align: left; vertical-align: top; }
+      th { background: var(--cc-surface-1); }
+      img { max-width: 100%; height: auto; border-radius: 4px; border: 1px solid var(--cc-border); }
+      img:not([src]) { display: none; }
+      figure { margin: 8px 0; }
+      figcaption { color: var(--cc-fg-muted); font-size: 12px; }
+      details { margin: 8px 0; }
+      summary { cursor: pointer; font-weight: 600; }
+      .card { border: 1px solid var(--cc-border); border-radius: 6px; padding: 8px 12px; margin: 8px 0; background: var(--cc-surface-1); }
+      .card.new { border-color: var(--cc-accent); box-shadow: inset 3px 0 0 var(--cc-accent); }
+      .card-header { color: var(--cc-fg-muted); font-size: 12px; margin-bottom: 4px; }
+      .meta { color: var(--cc-fg-muted); font-size: 12px; }
+      .lozenge { display: inline-block; font-size: 10.5px; font-weight: 600; text-transform: uppercase; padding: 0 5px; border-radius: 3px; background: var(--cc-surface-3); color: var(--cc-fg); }
+      .lozenge-info { background: color-mix(in srgb, #3b82f6 22%, transparent); color: color-mix(in srgb, #3b82f6 70%, var(--cc-fg)); }
+      .lozenge-success { background: color-mix(in srgb, #22c55e 22%, transparent); color: color-mix(in srgb, #22c55e 70%, var(--cc-fg)); }
+      .lozenge-warning { background: color-mix(in srgb, #f59e0b 24%, transparent); color: color-mix(in srgb, #f59e0b 70%, var(--cc-fg)); }
+      .lozenge-danger { background: color-mix(in srgb, #ef4444 24%, transparent); color: color-mix(in srgb, #ef4444 70%, var(--cc-fg)); }
+      dl.facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, max-content)); gap: 4px 24px; margin: 6px 0; }
+      dl.facts dt { grid-row: 1; font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--cc-fg-muted); }
+      dl.facts dd { grid-row: 2; margin: 0; }
+      .person { font-weight: 600; padding: 0 6px; border-radius: 3px; background: var(--cc-surface-2); }
+      .card.new .card-header .lozenge { background: var(--cc-accent); color: var(--cc-accent-fg); }
+      li > p { margin: 2px 0; }
+      .attachment-list { padding-left: 18px; }
+      .attachment-list li { margin: 4px 0; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <span class="muted grow">Notes on the mail need the reviewer (cc-cockpit 0.8.0 or later, enabled in this project).</span>
+      <button id="discuss" type="button" class="primary" title="Send the mail to the Claude tab you are looking at">Discuss</button>
+      <button id="new" type="button" title="Open a new Claude tab about this mail">New session</button>
+      <button id="browser" type="button" title="Open in Gmail">↗</button>
+    </header>
+    <div id="doc"><p class="muted">Loading…</p></div>
+  </body>
+</html>

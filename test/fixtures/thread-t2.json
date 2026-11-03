@@ -1,0 +1,50 @@
+{
+  "id": "18f0a1b2c3d4e5f2",
+  "historyId": "1002",
+  "messages": [
+    {
+      "id": "18f0a1b2c3d4e521",
+      "threadId": "18f0a1b2c3d4e5f2",
+      "labelIds": [
+        "UNREAD",
+        "CATEGORY_UPDATES",
+        "INBOX"
+      ],
+      "snippet": "Hidden preheader Top story: async closures",
+      "historyId": "900",
+      "internalDate": "1793689200000",
+      "sizeEstimate": 1234,
+      "payload": {
+        "partId": "",
+        "mimeType": "text/html",
+        "filename": "",
+        "headers": [
+          {
+            "name": "From",
+            "value": "Weekly News <news@letters.example>"
+          },
+          {
+            "name": "To",
+            "value": "Me <me@example.com>"
+          },
+          {
+            "name": "Subject",
+            "value": "This week in Rust"
+          },
+          {
+            "name": "Date",
+            "value": "Tue, 03 Nov 2026 07:00:00 GMT"
+          },
+          {
+            "name": "List-Id",
+            "value": "<weekly.letters.example>"
+          }
+        ],
+        "body": {
+          "size": 400,
+          "data": "PHRhYmxlIHJvbGU9InByZXNlbnRhdGlvbiIgd2lkdGg9IjEwMCUiPjx0cj48dGQ-PHNwYW4gc3R5bGU9ImRpc3BsYXk6bm9uZSI-SGlkZGVuIHByZWhlYWRlcjwvc3Bhbj48dGFibGUgd2lkdGg9IjYwMCIgY2VsbHBhZGRpbmc9IjAiPjx0cj48dGQ-PGgxPlRvcCBzdG9yeTwvaDE-PHA-YXN5bmMgY2xvc3VyZXMgYXJlIDxpPnN0YWJsZTwvaT4uPC9wPjxpbWcgc3JjPSJodHRwczovL2Nkbi5sZXR0ZXJzLmV4YW1wbGUvaGVyby5wbmciIGFsdD0iSGVybyI-PGltZyBzcmM9Imh0dHBzOi8vbGV0dGVycy5leGFtcGxlL29wZW4uZ2lmIiB3aWR0aD0iMSIgaGVpZ2h0PSIxIiBhbHQ9IiI-PC90ZD48L3RyPjwvdGFibGU-PC90ZD48L3RyPjwvdGFibGU-PHRhYmxlIGJvcmRlcj0iMSI-PHRyPjx0aD5DcmF0ZTwvdGg-PHRoPlZlcnNpb248L3RoPjwvdHI-PHRyPjx0ZD50b2tpbzwvdGQ-PHRkIGNvbHNwYW49IjEiPjEuNTA8L3RkPjwvdHI-PC90YWJsZT4"
+        }
+      }
+    }
+  ]
+}

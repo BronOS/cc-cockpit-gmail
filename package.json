@@ -1,0 +1,6 @@
+{
+  "name": "cc-cockpit-gmail",
+  "private": true,
+  "description": "Tests for the bronos.gmail cc-cockpit plugin; the plugin itself needs no install or build.",
+  "scripts": { "test": "node --test test/" }
+}

@@ -1,0 +1,236 @@
+{
+  "id": "18f0a1b2c3d4e5f1",
+  "historyId": "1001",
+  "messages": [
+    {
+      "id": "18f0a1b2c3d4e501",
+      "threadId": "18f0a1b2c3d4e5f1",
+      "labelIds": [
+        "INBOX",
+        "IMPORTANT",
+        "Label_7"
+      ],
+      "snippet": "Can you send the Q4 numbers by Friday?",
+      "historyId": "900",
+      "internalDate": "1793685600000",
+      "sizeEstimate": 1234,
+      "payload": {
+        "partId": "",
+        "mimeType": "multipart/alternative",
+        "filename": "",
+        "headers": [
+          {
+            "name": "From",
+            "value": "\"Ann Smith\" <ann@acme.com>"
+          },
+          {
+            "name": "To",
+            "value": "Me <me@example.com>"
+          },
+          {
+            "name": "Subject",
+            "value": "Q4 budget"
+          },
+          {
+            "name": "Date",
+            "value": "Tue, 03 Nov 2026 06:00:00 GMT"
+          }
+        ],
+        "body": {
+          "size": 0
+        },
+        "parts": [
+          {
+            "partId": "0",
+            "mimeType": "text/plain",
+            "filename": "",
+            "headers": [
+              {
+                "name": "Content-Type",
+                "value": "text/plain; charset=\"UTF-8\""
+              }
+            ],
+            "body": {
+              "size": 43,
+              "data": "Q2FuIHlvdSBzZW5kIHRoZSBRNCBudW1iZXJzIGJ5IEZyaWRheT8KCkFubg"
+            }
+          },
+          {
+            "partId": "1",
+            "mimeType": "text/html",
+            "filename": "",
+            "headers": [
+              {
+                "name": "Content-Type",
+                "value": "text/html; charset=\"UTF-8\""
+              }
+            ],
+            "body": {
+              "size": 77,
+              "data": "PGRpdiBkaXI9Imx0ciI-Q2FuIHlvdSBzZW5kIHRoZSBRNCBudW1iZXJzIGJ5IDxiPkZyaWRheTwvYj4_PGJyPjxicj5Bbm48L2Rpdj4"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "18f0a1b2c3d4e502",
+      "threadId": "18f0a1b2c3d4e5f1",
+      "labelIds": [
+        "SENT"
+      ],
+      "snippet": "Sure, working on it.",
+      "historyId": "900",
+      "internalDate": "1793687400000",
+      "sizeEstimate": 1234,
+      "payload": {
+        "partId": "",
+        "mimeType": "text/plain",
+        "filename": "",
+        "headers": [
+          {
+            "name": "From",
+            "value": "Me <me@example.com>"
+          },
+          {
+            "name": "To",
+            "value": "\"Ann Smith\" <ann@acme.com>"
+          },
+          {
+            "name": "Subject",
+            "value": "Re: Q4 budget"
+          },
+          {
+            "name": "Date",
+            "value": "Tue, 03 Nov 2026 06:30:00 GMT"
+          }
+        ],
+        "body": {
+          "size": 20,
+          "data": "U3VyZSwgd29ya2luZyBvbiBpdC4KCk9uIE1vbiwgQW5uIFNtaXRoIDxhbm5AYWNtZS5jb20-IHdyb3RlOgo-IENhbiB5b3Ugc2VuZCB0aGUgUTQgbnVtYmVycyBieSBGcmlkYXk_"
+        }
+      }
+    },
+    {
+      "id": "18f0a1b2c3d4e503",
+      "threadId": "18f0a1b2c3d4e5f1",
+      "labelIds": [
+        "INBOX",
+        "UNREAD",
+        "IMPORTANT",
+        "Label_7"
+      ],
+      "snippet": "Thanks! Also &quot;the logo&quot; for the deck, it&#39;s attached.",
+      "historyId": "900",
+      "internalDate": "1793691000000",
+      "sizeEstimate": 1234,
+      "payload": {
+        "partId": "",
+        "mimeType": "multipart/related",
+        "filename": "",
+        "headers": [
+          {
+            "name": "From",
+            "value": "\"Ann Smith\" <ann@acme.com>"
+          },
+          {
+            "name": "To",
+            "value": "Me <me@example.com>"
+          },
+          {
+            "name": "Cc",
+            "value": "Bob <bob@acme.com>"
+          },
+          {
+            "name": "Subject",
+            "value": "Re: Q4 budget"
+          },
+          {
+            "name": "Date",
+            "value": "Tue, 03 Nov 2026 07:30:00 GMT"
+          }
+        ],
+        "body": {
+          "size": 0
+        },
+        "parts": [
+          {
+            "partId": "0",
+            "mimeType": "multipart/alternative",
+            "filename": "",
+            "headers": [],
+            "body": {
+              "size": 0
+            },
+            "parts": [
+              {
+                "partId": "0.0",
+                "mimeType": "text/plain",
+                "filename": "",
+                "headers": [
+                  {
+                    "name": "Content-Type",
+                    "value": "text/plain; charset=\"UTF-8\""
+                  }
+                ],
+                "body": {
+                  "size": 94,
+                  "data": "VGhhbmtzISBBbHNvICJ0aGUgbG9nbyIgZm9yIHRoZSBkZWNrLCBpdCdzIGF0dGFjaGVkLgoKT24gTW9uLCBNZSB3cm90ZToKPiBTdXJlLCB3b3JraW5nIG9uIGl0Lg"
+                }
+              },
+              {
+                "partId": "0.1",
+                "mimeType": "text/html",
+                "filename": "",
+                "headers": [
+                  {
+                    "name": "Content-Type",
+                    "value": "text/html; charset=\"UTF-8\""
+                  }
+                ],
+                "body": {
+                  "size": 517,
+                  "data": "PGh0bWw-PGhlYWQ-PHN0eWxlPnB7Y29sb3I6cmVkfTwvc3R5bGU-PHNjcmlwdD5hbGVydCgxKTwvc2NyaXB0PjwvaGVhZD48Ym9keT48cCBvbmNsaWNrPSJzdGVhbCgpIj5UaGFua3MhIEFsc28gJnF1b3Q7dGhlIGxvZ28mcXVvdDsgZm9yIHRoZSBkZWNrOjwvcD48cD48aW1nIHNyYz0iY2lkOmxvZ29AYWNtZSIgYWx0PSJBY21lIGxvZ28iIHdpZHRoPSIxMjAiPjwvcD48cD48YSBocmVmPSJqYXZhc2NyaXB0OmFsZXJ0KDEpIj5jbGljazwvYT4gPGEgaHJlZj0iaHR0cHM6Ly9hY21lLmNvbS9kZWNrIj50aGUgZGVjazwvYT48L3A-PGltZyBzcmM9Imh0dHBzOi8vdHJhY2suZXhhbXBsZS9wLmdpZiIgd2lkdGg9IjEiIGhlaWdodD0iMSI-PGRpdiBjbGFzcz0iZ21haWxfcXVvdGUiPjxkaXYgY2xhc3M9ImdtYWlsX2F0dHIiPk9uIE1vbiwgTWUgd3JvdGU6PC9kaXY-PGJsb2NrcXVvdGUgY2xhc3M9ImdtYWlsX3F1b3RlIj5TdXJlLCB3b3JraW5nIG9uIGl0LjwvYmxvY2txdW90ZT48L2Rpdj48L2JvZHk-PC9odG1sPg"
+                }
+              }
+            ]
+          },
+          {
+            "partId": "1",
+            "mimeType": "image/png",
+            "filename": "logo.png",
+            "headers": [
+              {
+                "name": "Content-ID",
+                "value": "<logo@acme>"
+              },
+              {
+                "name": "Content-Disposition",
+                "value": "inline; filename=\"logo.png\""
+              }
+            ],
+            "body": {
+              "size": 64,
+              "attachmentId": "ANGjdJ_logo_att_id_1"
+            }
+          },
+          {
+            "partId": "2",
+            "mimeType": "application/pdf",
+            "filename": "Q4.pdf",
+            "headers": [
+              {
+                "name": "Content-Disposition",
+                "value": "attachment; filename=\"Q4.pdf\""
+              }
+            ],
+            "body": {
+              "size": 182000,
+              "attachmentId": "ANGjdJ_pdf_att_id_2"
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

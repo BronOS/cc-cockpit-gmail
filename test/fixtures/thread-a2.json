@@ -1,0 +1,84 @@
+{
+  "id": "18f0a1b2c3d4e5a2",
+  "historyId": "1102",
+  "messages": [
+    {
+      "id": "18f0a1b2c3d4e5b2",
+      "threadId": "18f0a1b2c3d4e5a2",
+      "labelIds": [
+        "INBOX",
+        "UNREAD"
+      ],
+      "snippet": "Firing Value: [ var=&#39;A&#39; ] Labels: - alertname=HighCPU grafana_folder=Prod nodename=node2 Annotations:",
+      "historyId": "900",
+      "internalDate": "1793690100000",
+      "sizeEstimate": 1234,
+      "payload": {
+        "partId": "",
+        "mimeType": "text/html",
+        "filename": "",
+        "headers": [
+          {
+            "name": "From",
+            "value": "Grafana <alerts@example.com>"
+          },
+          {
+            "name": "To",
+            "value": "ops@example.com"
+          },
+          {
+            "name": "Subject",
+            "value": "[FIRING:1] HighCPU Prod (node2 prod)"
+          },
+          {
+            "name": "Date",
+            "value": "Tue, 03 Nov 2026 07:15:00 GMT"
+          }
+        ],
+        "body": {
+          "size": 30,
+          "data": "PHA-RklSSU5HPC9wPjxwPmFsZXJ0bmFtZT1IaWdoQ1BVIGdyYWZhbmFfZm9sZGVyPVByb2Qgbm9kZW5hbWU9bm9kZTI8L3A-"
+        }
+      }
+    },
+    {
+      "id": "18f0a1b2c3d4e5b3",
+      "threadId": "18f0a1b2c3d4e5a2",
+      "labelIds": [
+        "INBOX",
+        "UNREAD"
+      ],
+      "snippet": "Resolved Value: [ var=&#39;A&#39; ] Labels: - alertname=HighCPU grafana_folder=Prod nodename=node2 Annotations:",
+      "historyId": "900",
+      "internalDate": "1793691600000",
+      "sizeEstimate": 1234,
+      "payload": {
+        "partId": "",
+        "mimeType": "text/html",
+        "filename": "",
+        "headers": [
+          {
+            "name": "From",
+            "value": "Grafana <alerts@example.com>"
+          },
+          {
+            "name": "To",
+            "value": "ops@example.com"
+          },
+          {
+            "name": "Subject",
+            "value": "[RESOLVED:1] HighCPU Prod (node2 prod)"
+          },
+          {
+            "name": "Date",
+            "value": "Tue, 03 Nov 2026 07:40:00 GMT"
+          }
+        ],
+        "body": {
+          "size": 30,
+          "data": "PHA-UkVTT0xWRUQ8L3A-PHA-YWxlcnRuYW1lPUhpZ2hDUFUgZ3JhZmFuYV9mb2xkZXI9UHJvZCBub2RlbmFtZT1ub2RlMjwvcD4"
+        }
+      }
+    }
+  ]
+}

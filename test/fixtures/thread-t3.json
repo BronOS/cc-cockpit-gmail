@@ -1,0 +1,48 @@
+{
+  "id": "18f0a1b2c3d4e5f3",
+  "historyId": "1003",
+  "messages": [
+    {
+      "id": "18f0a1b2c3d4e531",
+      "threadId": "18f0a1b2c3d4e5f3",
+      "labelIds": [
+        "INBOX"
+      ],
+      "snippet": "Café at noon?",
+      "historyId": "900",
+      "internalDate": "1793674800000",
+      "sizeEstimate": 1234,
+      "payload": {
+        "partId": "",
+        "mimeType": "text/plain",
+        "filename": "",
+        "headers": [
+          {
+            "name": "From",
+            "value": "Carl <carl@example.org>"
+          },
+          {
+            "name": "To",
+            "value": "Me <me@example.com>"
+          },
+          {
+            "name": "Subject",
+            "value": "Lunch?"
+          },
+          {
+            "name": "Date",
+            "value": "Tue, 03 Nov 2026 03:00:00 GMT"
+          },
+          {
+            "name": "Content-Type",
+            "value": "text/plain; charset=\"ISO-8859-1\""
+          }
+        ],
+        "body": {
+          "size": 13,
+          "data": "Q2Fm6SBhdCBub29uPyBTZWUgaHR0cHM6Ly9leGFtcGxlLm9yZy9tZW51Lg"
+        }
+      }
+    }
+  ]
+}

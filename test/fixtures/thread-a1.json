@@ -1,0 +1,45 @@
+{
+  "id": "18f0a1b2c3d4e5a1",
+  "historyId": "1101",
+  "messages": [
+    {
+      "id": "18f0a1b2c3d4e5b1",
+      "threadId": "18f0a1b2c3d4e5a1",
+      "labelIds": [
+        "INBOX",
+        "UNREAD"
+      ],
+      "snippet": "Firing Value: [ var=&#39;A&#39; ] Labels: - alertname=HighCPU grafana_folder=Prod nodename=node1 Annotations:",
+      "historyId": "900",
+      "internalDate": "1793689800000",
+      "sizeEstimate": 1234,
+      "payload": {
+        "partId": "",
+        "mimeType": "text/html",
+        "filename": "",
+        "headers": [
+          {
+            "name": "From",
+            "value": "Grafana <alerts@example.com>"
+          },
+          {
+            "name": "To",
+            "value": "ops@example.com"
+          },
+          {
+            "name": "Subject",
+            "value": "[FIRING:1] HighCPU Prod (node1 prod)"
+          },
+          {
+            "name": "Date",
+            "value": "Tue, 03 Nov 2026 07:10:00 GMT"
+          }
+        ],
+        "body": {
+          "size": 30,
+          "data": "PHA-RklSSU5HPC9wPjxwPmFsZXJ0bmFtZT1IaWdoQ1BVIGdyYWZhbmFfZm9sZGVyPVByb2Qgbm9kZW5hbWU9bm9kZTE8L3A-"
+        }
+      }
+    }
+  ]
+}

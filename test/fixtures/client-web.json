@@ -1,0 +1,12 @@
+{
+  "web": {
+    "client_id": "123456789012-web.apps.googleusercontent.com",
+    "project_id": "x",
+    "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+    "token_uri": "https://oauth2.googleapis.com/token",
+    "client_secret": "GOCSPX-web",
+    "redirect_uris": [
+      "https://example.com/cb"
+    ]
+  }
+}
