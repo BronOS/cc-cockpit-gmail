@@ -25,7 +25,7 @@ const HELP = `ccc gmail: your Gmail (bronos.gmail)
   ccc gmail help              this text
 
 The plugin changes only whether a thread is read (Gmail's UNREAD label): it never archives,
-labels, trashes or sends. Opening a thread in the panel marks it read (setting markReadOnOpen).
+labels, trashes or sends. Opening a thread in the panel leaves it unread unless markReadOnOpen is on.
 Settings: ccc plugin config bronos.gmail (the client secret only in Settings > This project).
 `
 

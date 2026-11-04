@@ -15,7 +15,8 @@
 // Writes (0.3.0, design "Read state"): only the read state, through client.setUnread (the UNREAD
 // label, nothing else; http.setThreadUnread is the plugin's only write), bounded by readstate.js's
 // gate. Mark read / Mark unread on a row, `ccc gmail read|unread`, and opening a thread from the
-// panel while the project setting markReadOnOpen is on (the default).
+// panel while the project setting markReadOnOpen is on (off by default since 0.4.0: a look should
+// not take a thread out of Unread).
 
 const path = require('node:path')
 const { readSettings } = require('./lib/settings')
@@ -709,7 +710,7 @@ function start(ctx, io = {}) {
    * Jira mail: the issue goes beside the mail (annotate's `companion`) when the reviewer's features()
    * says it can; a refused companion call is tried once more with the issue below the mail, as an
    * older reviewer gets it, before text.
-   * With markReadOnOpen on (the default) the opened thread (an alert row: the threads it shows) is
+   * With markReadOnOpen on (off by default) the opened thread (an alert row: the threads it shows) is
    * marked read in Gmail meanwhile, as Gmail does; not when the sign-in cannot write (the panel asks
    * to sign in again instead).
    */

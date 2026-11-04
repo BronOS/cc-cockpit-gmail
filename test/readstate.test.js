@@ -241,8 +241,8 @@ test('one thread of an alert group fails: only that one goes back, the notice co
   await h.stop()
 })
 
-test('markReadOnOpen (default on): opening an unread thread marks it read; a read thread is not written', async () => {
-  const { ctx, h, gmail } = await signedIn()
+test('markReadOnOpen on: opening an unread thread marks it read; a read thread is not written', async () => {
+  const { ctx, h, gmail } = await signedIn({ project: { alertSenders: ['alerts@example.com'], markReadOnOpen: true } })
   await ctx.sendPanel({ type: 'open', id: T.t1 })
   await h.writesIdle()
   assert.deepEqual(gmail.state.modifies, [{ id: T.t1, body: { removeLabelIds: ['UNREAD'] } }])
@@ -270,7 +270,7 @@ test('markReadOnOpen off: opening leaves the thread unread in Gmail and in the l
 })
 
 test('markReadOnOpen on an alert row marks the threads it shows read', async () => {
-  const { ctx, h, gmail } = await signedIn()
+  const { ctx, h, gmail } = await signedIn({ project: { alertSenders: ['alerts@example.com'], markReadOnOpen: true } })
   await ctx.sendPanel({ type: 'open', id: 'alert:HighCPU' })
   await h.writesIdle()
   assert.deepEqual(gmail.state.modifies.map((m) => m.id).sort(), [T.a1, T.a2].sort())
@@ -347,7 +347,7 @@ test('a 0.2.0 sign-in in the host: lanes as before, the prompt to sign in again,
   await ctx.sendPanel({ type: 'hello' })
   let st = ctx.lastState()
   assert.ok(ids(st, 'unread').length > 0, 'reading is not broken')
-  assert.deepEqual(st.write, { allowed: false, prompt: true, markReadOnOpen: true })
+  assert.deepEqual(st.write, { allowed: false, prompt: true, markReadOnOpen: false })
   await ctx.sendPanel({ type: 'open', id: T.t1 })
   await ctx.sendPanel({ type: 'markRead', id: T.t2 })
   await h.writesIdle()
@@ -373,7 +373,7 @@ test('scope upgrade: a readonly grant fails its first write (rolled back, the pr
   await h.writesIdle()
   let st = ctx.lastState()
   assert.ok(ids(st, 'unread').includes(T.t2), 'rolled back')
-  assert.deepEqual(st.write, { allowed: false, prompt: true, markReadOnOpen: true })
+  assert.deepEqual(st.write, { allowed: false, prompt: true, markReadOnOpen: false })
   assert.ok(!st.notice || st.notice.kind !== 'error', 'the prompt says it, not an error notice')
   assert.equal(gmail.state.modifies.length, 0)
   const classified = triage.calls.length

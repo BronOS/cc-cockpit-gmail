@@ -61,7 +61,7 @@ test('emailAddress lower-cases and refuses search syntax', () => {
 
 test('readSettings: defaults, clamps, lane switches, alert senders checked in code', () => {
   const { cfg, problems } = readSettings({})
-  assert.deepEqual(cfg, { clientId: '', clientSecret: '', lanes: { unread: true, alerts: true, read: true }, alertSenders: [], rowsPerLane: 10, unreadDays: 14, maxUnread: 15, readDays: 2, maxRead: 10, pollMinutes: 2, triageText: 'full', markReadOnOpen: true })
+  assert.deepEqual(cfg, { clientId: '', clientSecret: '', lanes: { unread: true, alerts: true, read: true }, alertSenders: [], rowsPerLane: 10, unreadDays: 14, maxUnread: 15, readDays: 2, maxRead: 10, pollMinutes: 2, triageText: 'full', markReadOnOpen: false })
   assert.deepEqual(problems, [])
   const r = readSettings({ clientId: 'nope', maxUnread: 1000, pollMinutes: 0, readDays: 'x', lanes: { read: false, unread: 'yes' }, alertSenders: ['A@x.org', 'a@x.org', '', 'bad one', 7], triageText: 'summary' })
   assert.equal(r.cfg.clientId, '')
@@ -72,7 +72,8 @@ test('readSettings: defaults, clamps, lane switches, alert senders checked in co
   assert.deepEqual(r.cfg.alertSenders, ['a@x.org'])
   assert.equal(r.cfg.triageText, 'summary')
   assert.equal(readSettings({ markReadOnOpen: false }).cfg.markReadOnOpen, false)
-  assert.equal(readSettings({ markReadOnOpen: 'no' }).cfg.markReadOnOpen, true)
+  assert.equal(readSettings({ markReadOnOpen: 'no' }).cfg.markReadOnOpen, false)
+  assert.equal(readSettings({ markReadOnOpen: true }).cfg.markReadOnOpen, true)
   assert.equal(r.problems.length, 3)
   assert.match(r.problems[0], /^clientId: a Google client id ends in/)
   assert.match(r.problems[1], /"bad one" is not an email address/)

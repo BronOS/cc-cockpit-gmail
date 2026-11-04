@@ -105,8 +105,8 @@
           "markReadOnOpen": {
             "type": "boolean",
             "title": "Opening a thread marks it read",
-            "description": "Opening a thread from the panel marks it read in Gmail, as Gmail does (an alert row: the threads it shows). Off: it stays unread until you press Mark read.",
-            "default": true
+            "description": "Opening a thread from the panel marks it read in Gmail, as Gmail does (an alert row: the threads it shows). Off (the default): it stays unread until you press Mark read, so a look does not take it out of Unread.",
+            "default": false
           },
           "triageText": {
             "type": "string",

@@ -15,8 +15,8 @@ function that can do nothing else. Since 0.3.0 it asks Google for `gmail.modify`
 - **Discuss with Claude**: click a row and the thread opens in the reviewer overlay as a clean
   page (every message as a card, its pictures, its attachments listed), where you select text to
   add notes and press Discuss (the Claude tab you are looking at) or New session.
-- **Mark read / Mark unread** (0.3.0): a button on each row; opening a thread marks it read, as
-  Gmail does (setting `markReadOnOpen`).
+- **Mark read / Mark unread** (0.3.0): a button on each row; opening a thread leaves it unread
+  unless you turn on `markReadOnOpen` (then it is marked read, as Gmail does).
 - **Jira mail** (0.2.0, with the [Jira plugin](https://github.com/BronOS/cc-cockpit-jira) enabled in
   the project): a mail from Jira gets triage hints from the issue's real status, and opening it shows
   the issue beside the mail (see "Jira mail").
@@ -132,7 +132,7 @@ Settings > This project > Gmail, or from a tab: `ccc plugin config bronos.gmail 
 | `alertSenders` | `[]` | addresses whose mail goes to Alerts; empty: no Alerts lane |
 | `pollMinutes` | 2 | only while the project's window is open |
 | `triageText` | `full` | `full` or `summary` (see Privacy) |
-| `markReadOnOpen` | `true` | opening a thread from the panel marks it read in Gmail (an alert row: the threads it shows); off: it stays unread until you press Mark read |
+| `markReadOnOpen` | `false` | on: opening a thread from the panel marks it read in Gmail (an alert row: the threads it shows); off (the default since 0.4.0): it stays unread until you press Mark read |
 
 ```sh
 ccc plugin config bronos.gmail 'alertSenders=["alerts@grafana.example.com"]' pollMinutes=5
@@ -163,8 +163,8 @@ since the last one (`users.history.list`, almost free); only then, or every 10th
 searches and reads the threads whose history changed (their headers only, 4 at a time). When Gmail
 is busy (429 or 5xx) the interval doubles, up to 30 minutes, with a notice, until Gmail answers.
 
-**Click a row** (or press Enter on it) to open the thread (see below; with `markReadOnOpen` on, the
-default, it is marked read). The other actions are small buttons that show while the pointer is
+**Click a row** (or press Enter on it) to open the thread (see below; with `markReadOnOpen` on, it is
+marked read; by default it stays unread). The other actions are small buttons that show while the pointer is
 over a row or the row has the keyboard focus: **↗** (the thread in Gmail, in this account; an alert
 row opens a Gmail search), **Mark read** / **Mark unread** (see "Mark read and unread"), the triage verdict
 (**action ▾**: change how much the mail needs you; to record why, use Wrong? in the Jev triage
@@ -181,8 +181,8 @@ a yes/no in one function, so no other label change is possible.
 - **Mark read** on a row of Unread or Alerts (an alert group: all of its unread threads), **Mark
   unread** on a row of Read. The row moves at once; if Gmail refuses, it moves back and the panel
   says why.
-- **Opening a thread** from the panel marks it read (an alert row: the threads it shows), unless the
-  project setting `markReadOnOpen` is off. Discuss, New session and `ccc gmail show` do not.
+- **Opening a thread** from the panel marks it read (an alert row: the threads it shows) only when the
+  project setting `markReadOnOpen` is on (off by default). Discuss, New session and `ccc gmail show` do not.
 - `ccc gmail read <threadId>` and `ccc gmail unread <threadId>` (`read alert:<name>`: the group).
 - A whole thread changes: Mark unread makes every message of the thread unread.
 - At most 4 changes at once and 120 a minute (an alert group of 100 threads fits in one); more wait.

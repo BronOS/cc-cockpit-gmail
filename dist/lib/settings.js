@@ -59,7 +59,7 @@ function readSettings(p) {
     pollMinutes: int(s.pollMinutes, 2, 1, 1440),
     triageText: s.triageText === 'summary' ? 'summary' : 'full',
     // 0.3.0: opening a thread from the panel marks it read in Gmail, as Gmail does; off keeps it unread.
-    markReadOnOpen: typeof s.markReadOnOpen === 'boolean' ? s.markReadOnOpen : true,
+    markReadOnOpen: typeof s.markReadOnOpen === 'boolean' ? s.markReadOnOpen : false,
   }
   return { cfg, problems }
 }

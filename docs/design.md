@@ -214,7 +214,7 @@ host's `writeReadState` / `markRow`.
 - **Where**: a hover button on every row: Mark read (an unread thread in Unread or Alerts; an alert
   group: all of its unread threads), Mark unread (a read thread in Read). `ccc gmail read <id>`
   (`alert:<name>` too) and `ccc gmail unread <threadId>`. Opening a thread from the panel marks it
-  read when the project setting `markReadOnOpen` (boolean, default true) is on: the threads the open
+  read when the project setting `markReadOnOpen` (boolean, default false since 0.4.0; it was true) is on: the threads the open
   read fresh that have an UNREAD message (an alert row: the up to 10 it shows); in the background,
   after the read, never for Discuss, New session or `ccc gmail show`.
 - **Optimistic**: the host keeps an override per thread (`S.marks`: unread or not) over the cached
