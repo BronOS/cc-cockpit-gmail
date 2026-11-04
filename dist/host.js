@@ -713,8 +713,56 @@ function start(ctx, io = {}) {
    * With markReadOnOpen on (off by default) the opened thread (an alert row: the threads it shows) is
    * marked read in Gmail meanwhile, as Gmail does; not when the sign-in cannot write (the panel asks
    * to sign in again instead).
+   * The reviewer's overlay is up before the thread is read (its prepare, where it has one): reading a
+   * thread with its pictures and its Jira issue takes seconds, with nothing on screen meanwhile
+   * (real-work feedback 8). The annotate below fills that overlay; whatever else happens (a failed
+   * read, our own reader page) closes it in the finally.
    */
   async function openThread(id) {
+    const pre = await prepareView(id)
+    try {
+      await showThread(id, pre)
+    } finally {
+      if (pre) await cancelView(pre)
+    }
+  }
+
+  /**
+   * The reviewer key and title of a row before its thread is read, the ones loadThread and openThread's
+   * annotate give it (`gmail:<thread>`, `gmail:alert:<hash>`), or null.
+   */
+  function viewKeyOf(id) {
+    const which = rowId(id)
+    if (!which) return null
+    const row = rowOf(id)
+    if (which.thread) return { key: `gmail:${which.thread}`, title: (row && row.facts && row.facts.subject) || '' }
+    if (!row || row.kind !== 'alert') return null
+    return { key: `gmail:alert:${sha(row.group.name, 16)}`, title: groupTitle(row.group) }
+  }
+
+  /**
+   * Opens the reviewer's overlay of a row now, with its loader: `{ key }` when it did, else null (no
+   * reviewer with annotate, or one without prepare, which rejects with "has no method": the overlay
+   * then comes with the annotate, as before).
+   */
+  async function prepareView(id) {
+    if (!annotateOn()) return null
+    const v = viewKeyOf(id)
+    if (!v) return null
+    try {
+      await within(reviewer.prepare({ key: v.key, title: cut(oneLine(v.title), 200) || '(no subject)' }), FEATURES_WAIT_MS)
+      return { key: v.key }
+    } catch {
+      return null
+    }
+  }
+
+  /** Closes a prepared overlay no annotate filled; a no-op once one did. */
+  async function cancelView(pre) {
+    await within(reviewer.cancel({ key: pre.key }), FEATURES_WAIT_MS).catch((e) => ctx.log.warn(`reviewer.cancel: ${e && e.message ? e.message : e}`))
+  }
+
+  async function showThread(id, pre) {
     const t = await loadThread(id)
     if (cfg().markReadOnOpen && canWrite() && t.unreadThreads.length) {
       void writeReadState(t.unreadThreads, false).then((r) => {
@@ -787,6 +835,8 @@ function start(ctx, io = {}) {
         }
       }
     }
+    // Our own page instead of the reviewer's: its loader goes first (it cannot show this page).
+    if (pre) await cancelView(pre)
     await plainReader(id, t, await view(false))
   }
 
@@ -861,7 +911,8 @@ function start(ctx, io = {}) {
 
   async function newSession(id) {
     const prompt = await threadPrompt(id)
-    await ctx.sessions.open({ prompt })
+    // The person clicked New session: the window shows the tab (an older app ignores `focus`).
+    await ctx.sessions.open({ prompt, focus: true })
     setNotice(`Opened a new Claude tab about ${labelOf(id)}.`)
   }
 

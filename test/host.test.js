@@ -532,6 +532,63 @@ test('a reviewer that refuses html: text this time and for the rest of the run',
   await h.stop()
 })
 
+// Real-work feedback 8: the overlay came only after the thread (and its pictures) were read.
+test('Open with a reviewer that has prepare: the overlay is up before the thread is read, then filled', async () => {
+  const order = []
+  const reviewer = {
+    prepare: async (spec) => (order.push(['prepare', spec]), { opened: true }),
+    cancel: async (spec) => (order.push(['cancel', spec]), { closed: false }),
+    annotate: async (spec) => (order.push(['annotate', spec.key]), { opened: true }),
+  }
+  const { ctx, h, gmail } = await signedIn({ reviewer })
+  const reads = () => gmail.calls.filter((x) => /\/threads\//.test(x.path)).length
+  const before = reads()
+  const realPrepare = reviewer.prepare
+  reviewer.prepare = async (spec) => {
+    // Nothing of the thread was read yet when the overlay was asked for.
+    order.push(['reads at prepare', reads() - before])
+    return realPrepare(spec)
+  }
+  await ctx.sendPanel({ type: 'open', id: T.t1 })
+  assert.deepEqual(order[0], ['reads at prepare', 0])
+  // The row's subject (its newest mail's): the thread is not read yet.
+  assert.deepEqual(order[1], ['prepare', { key: `gmail:${T.t1}`, title: 'Re: Q4 budget' }])
+  assert.ok(reads() > before, 'the open read the thread, after prepare')
+  assert.deepEqual(order[2], ['annotate', `gmail:${T.t1}`])
+  // The finally's cancel (a no-op once filled).
+  assert.deepEqual(order[3], ['cancel', { key: `gmail:${T.t1}` }])
+  // An alert group: the same key annotate gets.
+  order.length = 0
+  await ctx.sendPanel({ type: 'open', id: 'alert:HighCPU' })
+  const prepared = order.find((x) => x[0] === 'prepare')[1]
+  assert.match(prepared.key, /^gmail:alert:[a-f0-9]{16}$/)
+  assert.match(prepared.title, /^HighCPU: node1/)
+  assert.equal(order.find((x) => x[0] === 'annotate')[1], prepared.key)
+  await h.stop()
+})
+
+test('Open with prepare: an open that fails cancels the loading overlay; a reviewer without prepare still opens', async () => {
+  const calls = []
+  const reviewer = {
+    prepare: async (spec) => (calls.push(['prepare', spec.key]), { opened: true }),
+    cancel: async (spec) => (calls.push(['cancel', spec.key]), { closed: true }),
+    annotate: async () => {
+      throw new Error('reviewer: the review overlay did not open: overlay: at most 3 open')
+    },
+  }
+  const { ctx, h } = await signedIn({ reviewer })
+  await ctx.sendPanel({ type: 'open', id: T.t1 })
+  assert.deepEqual(calls, [['prepare', `gmail:${T.t1}`], ['cancel', `gmail:${T.t1}`]])
+  assert.match(ctx.lastState().notice.text, /could not open the mail/)
+  await h.stop()
+  // An older reviewer (no prepare, no cancel): annotate alone, as before.
+  const old = []
+  const b = await signedIn({ reviewer: { annotate: async (s) => (old.push(s.key), { opened: true }) } })
+  await b.ctx.sendPanel({ type: 'open', id: T.t1 })
+  assert.deepEqual(old, [`gmail:${T.t1}`])
+  await b.h.stop()
+})
+
 test('no annotate (an older reviewer) or no reviewer: the plugin\'s reader page, in parts', async () => {
   const { ctx, h } = await signedIn({ reviewer: { open: async () => ({}) }, overlayAnswer: { kind: 'value', value: { action: 'newSession' } } })
   await ctx.sendPanel({ type: 'open', id: T.t1 })
@@ -543,6 +600,7 @@ test('no annotate (an older reviewer) or no reviewer: the plugin\'s reader page,
   // The page's answer: a new session about the mail.
   assert.equal(ctx.opened.length, 1)
   assert.match(ctx.opened[0].prompt, /^About the mail "Q4 budget" from Ann Smith/)
+  assert.equal(ctx.opened[0].focus, true, 'the new tab is shown')
   // A link click in the page is opened by the app, and only a link the host put into the page.
   o.send({ open: 'https://acme.com/deck' })
   o.send({ open: 'file:///etc/passwd' })
