@@ -1236,6 +1236,20 @@ function start(ctx, io = {}) {
     return row
   }
 
+  /** The answer of `items` / `recent`: `pick` over the cached rows, with the state of the plugin around them. */
+  function feedAnswer(pick, limit) {
+    const a = auth ? auth.status() : null
+    const out = { items: pick(feedRows(), { limit, me: (S.cache && S.cache.account) || '', jiraKeys: S.jiraKeys }), asOf: (S.cache && S.cache.lastPoll) || 0, state: 'ok' }
+    if (!signedIn()) {
+      out.state = 'signedOut'
+      out.message = cut(oneLine(tooOld || (a && (a.signedOutReason || (a.settingsMissing && a.settingsMissing.length ? 'Gmail is not set up in this project.' : ''))) || 'Not signed in to Google.'), 300)
+    } else if (S.error) {
+      out.state = 'error'
+      out.message = cut(oneLine(S.error), 300)
+    }
+    return out
+  }
+
   if (ctx.services && typeof ctx.services.provide === 'function') {
     ctx.services.provide('inbox-feed', {
       describe: async () => ({ ...F.DESCRIBE }),
@@ -1243,16 +1257,13 @@ function start(ctx, io = {}) {
       async items(arg) {
         const limit = F.feedLimit(arg)
         await ready
-        const a = auth ? auth.status() : null
-        const out = { items: F.feedItems(feedRows(), { limit, me: (S.cache && S.cache.account) || '', jiraKeys: S.jiraKeys }), asOf: (S.cache && S.cache.lastPoll) || 0, state: 'ok' }
-        if (!signedIn()) {
-          out.state = 'signedOut'
-          out.message = cut(oneLine(tooOld || (a && (a.signedOutReason || (a.settingsMissing && a.settingsMissing.length ? 'Gmail is not set up in this project.' : ''))) || 'Not signed in to Google.'), 300)
-        } else if (S.error) {
-          out.state = 'error'
-          out.message = cut(oneLine(S.error), 300)
-        }
-        return out
+        return feedAnswer((rows, o) => F.feedItems(rows, o), limit)
+      },
+      // Optional (features() says so): the read threads of the Read lane, newest first. Same cache, same states.
+      async recent(arg) {
+        const limit = F.feedLimit(arg)
+        await ready
+        return feedAnswer((rows, o) => F.recentItems(rows, o), limit)
       },
       async open(id) {
         feedRow(id)
