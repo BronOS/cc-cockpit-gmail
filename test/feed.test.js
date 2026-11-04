@@ -167,9 +167,9 @@ async function signedIn(opts) {
 
 test('the plugin provides inbox-feed with the contract\'s methods and describes itself', async () => {
   const { feed, h } = boot()
-  assert.deepEqual(Object.keys(feed).sort(), ['describe', 'features', 'items', 'markRead', 'open', 'recent'])
+  assert.deepEqual(Object.keys(feed).sort(), ['describe', 'features', 'items', 'markRead', 'markUnread', 'open', 'recent'])
   assert.deepEqual(await feed.describe(), { label: 'Mail', badge: 'MAIL', color: 'red', kind: 'mail' })
-  assert.deepEqual(await feed.features(), ['markRead', 'recent'])
+  assert.deepEqual(await feed.features(), ['markRead', 'recent', 'markUnread'])
   await h.stop()
 })
 
@@ -359,6 +359,36 @@ test('markRead: a Gmail refusal is thrown as gmail: <why>, the item stays', asyn
   const b = await signedIn({ gmail: { fail: { [`modify:${T.t1}`]: 500 } } })
   await assert.rejects(b.feed.markRead(T.t1), /^Error: gmail: /)
   assert.ok((await b.feed.items({})).items.some((i) => i.id === T.t1))
+  await b.h.stop()
+})
+
+test('markUnread: a read thread goes through the panel write (UNREAD label), moves to items, changed is emitted', async () => {
+  const b = await signedIn()
+  const before = b.ctx.emitted.length
+  await b.feed.markUnread(T.t3)
+  await b.h.writesIdle()
+  assert.deepEqual(b.gmail.state.modifies.map((m) => m.id), [T.t3])
+  assert.deepEqual(b.gmail.state.modifies[0].body, { addLabelIds: ['UNREAD'] })
+  assert.ok((await b.feed.items({})).items.some((i) => i.id === T.t3))
+  assert.ok(!(await b.feed.recent({})).items.some((i) => i.id === T.t3))
+  assert.ok(b.ctx.emitted.length > before)
+  assert.deepEqual(b.ctx.emitted[b.ctx.emitted.length - 1], { name: 'inbox-feed', event: 'changed', data: {} })
+  await b.h.stop()
+})
+
+test('markUnread: a Gmail refusal is thrown as gmail: <why>, the thread stays read', async () => {
+  const b = await signedIn({ gmail: { fail: { [`modify:${T.t3}`]: 500 } } })
+  await assert.rejects(b.feed.markUnread(T.t3), /^Error: gmail: /)
+  assert.ok((await b.feed.recent({})).items.some((i) => i.id === T.t3))
+  await b.h.stop()
+})
+
+test('markUnread with a bad id is refused before anything reaches Gmail', async () => {
+  const b = await signedIn()
+  const calls = b.gmail.calls.length
+  for (const bad of [undefined, null, 5, {}, '', '../x', 'alert:', T.t3 + 'zz', 'ffffffffffffffff']) await assert.rejects(b.feed.markUnread(bad), /^Error: gmail: /, String(bad))
+  assert.equal(b.gmail.calls.length, calls)
+  assert.deepEqual(b.gmail.state.modifies, [])
   await b.h.stop()
 })
 

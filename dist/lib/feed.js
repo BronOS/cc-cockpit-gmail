@@ -27,7 +27,7 @@ const { addressedTo } = require('./model')
 const { groupTitle } = require('./alerts')
 
 const DESCRIBE = Object.freeze({ label: 'Mail', badge: 'MAIL', color: 'red', kind: 'mail' })
-const FEATURES = Object.freeze(['markRead', 'recent'])
+const FEATURES = Object.freeze(['markRead', 'recent', 'markUnread'])
 const LEVEL_RANK = { urgent: 0, action: 1, fyi: 2, noise: 3 }
 const LIMIT = { def: 20, min: 1, max: 50 }
 const CUTS = { title: 300, from: 200, where: 60 }

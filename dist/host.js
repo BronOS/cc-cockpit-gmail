@@ -1274,6 +1274,12 @@ function start(ctx, io = {}) {
         const r = await markRow(id, false)
         if (r.error) throw new Error(`gmail: ${cut(oneLine(r.error), 300)}`)
       },
+      // Optional (features() says so): the panel's own Mark unread (markRow unread), for the read rows of `recent`.
+      async markUnread(id) {
+        feedRow(id)
+        const r = await markRow(id, true)
+        if (r.error) throw new Error(`gmail: ${cut(oneLine(r.error), 300)}`)
+      },
     })
   }
 

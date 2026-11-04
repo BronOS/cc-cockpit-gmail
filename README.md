@@ -269,7 +269,8 @@ Gmail call: your **unread** threads (and alert groups), best first by the plugin
 so a new reply brings a thread back in Inbox. Inbox can open a thread (the same as a click on its
 row) and mark it read (the same write as Mark read). The optional `recent` method (announced
 through `features()`) lists the read threads of the Read lane, newest first, from the same cache, so
-Inbox can reopen one; opening it marks nothing read here. Mail from Jira carries its issue key. Nothing
+Inbox can reopen one; opening it marks nothing read here. The optional `markUnread` method is the panel's own Mark unread,
+so Inbox can offer it on those read rows. Mail from Jira carries its issue key. Nothing
 leaves your machine: the data goes to another plugin of the same project. It works with any
 cc-cockpit that has plugin services; Inbox itself needs 0.9.7.
 
