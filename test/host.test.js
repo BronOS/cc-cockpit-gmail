@@ -794,6 +794,22 @@ test('overlay buttons: only for our own items, labels follow state, run = act', 
   await h.stop()
 })
 
+test('overlay buttons: only on overlays we or the reviewer opened, whatever the data names', async () => {
+  const { ctx, h } = await signedIn()
+  const provider = ctx.buttonProviders[0].provider
+  // `opener` is the app's record of who opened the overlay: another plugin naming our item, a type
+  // data claiming to be ours, the CLI or core get no buttons that act on it.
+  const by = (opener) => ({ type: { name: 'inbox-item', data: { source: 'bronos.gmail', id: T.t1, opener: 'bronos.gmail' } }, title: 't', opener })
+  for (const foreign of ['evil.plugin', 'bronos.inbox', 'cli', 'core', '', undefined]) {
+    assert.deepEqual(await provider(by(foreign)), [], `opener ${foreign}`)
+  }
+  assert.deepEqual(await provider({ type: by('x').type, title: 't' }), [])
+  // Our own reader page and the reviewer we hand the item to do.
+  assert.equal((await provider(by('bronos.gmail'))).length, 1)
+  assert.equal((await provider(by('cockpit.reviewer'))).length, 1)
+  await h.stop()
+})
+
 test('overlay buttons: a ctx without the member still activates and opens a thread', async () => {
   const { ctx, h } = await signedIn({ noButtons: true, reviewer: { open: async () => ({}) } })
   assert.equal(ctx.buttonProviders.length, 0)
