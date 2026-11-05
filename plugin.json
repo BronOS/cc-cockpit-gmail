@@ -1,7 +1,7 @@
 {
   "id": "bronos.gmail",
   "name": "Gmail",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "api": 1,
   "main": "dist/host.js",
   "description": "Your Gmail in lanes (Unread, Alerts, Read), Grafana alerts grouped, sorted by Jev triage, a thread opened as a clean page to discuss with Claude, Jira mail with its issue (with bronos.jira), mark read / unread. It only ever changes the read state: it never archives, labels, trashes or sends.",
