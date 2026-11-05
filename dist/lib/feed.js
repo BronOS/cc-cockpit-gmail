@@ -1,112 +1,155 @@
 'use strict'
-// The `inbox-feed` service (v1, 0.4.0) this plugin provides to Inbox: the pure parts. The host
+// The `inbox-feed` service (v2, 0.5.0) this plugin provides to Inbox: the pure parts. The host
 // (dist/host.js) wires them to its view and its existing open and mark-read paths.
 //
-// - Built only from the cached view the panel shows (poll.buildView), never an API call: Inbox may
-//   ask on every refresh, and a service call has no rate limit from the app. Unread rows only: a
-//   thread the person has read in Gmail (or marked read here) has left their inbox, and the Read
-//   lane is there for the panel, not for a queue of things that need them.
-// - `recent` (optional, announced through `features()`): the same FeedItems for the READ rows of the
-//   Read lane, newest first, so Inbox can offer "reopen what I just read". Same cache, same row
-//   mapping, caps and limit rule, still never an API call. A thread marked read here while it sits in
-//   the Unread lane is not in it (the lane is the contract, not the flag alone). open() already finds
-//   these ids: it searches every row of the view, the Read lane included.
-// - `level` is this plugin's own triage verdict (Jev, or its alert/Jira hints), best first. A row
-//   without a verdict (triage off, not judged yet) is `fyi`: shown after the judged ones, never
-//   hidden and never shouted. Noise is left out unless nothing else is left.
-// - `rev` is the id of the newest message (an alert group: of its newest alert), so a new reply
-//   changes it and Inbox's "done until it changes" brings the thread back; marking read does not.
-// - `direct`: the message that speaks for the thread has the person in To (not Cc, not a list).
-//   `mentionsMe` is left out: mail has no mention notion. `jiraKey` is what lib/jira.js found.
-// - Arguments come from another plugin, so every one is checked; strings are cut to the same
-//   bounds the cache keeps, the result is plain data (the registry copies it with structuredClone).
-//   Errors are thrown as `gmail: <why>`.
+// - Built only from the cached view the panel shows (poll.buildView) and the cached threads, never
+//   an API call: Inbox calls `snapshot()` whenever a provider joins and a service call has no rate
+//   limit from the app.
+// - The scope is the view itself: the threads of the Unread and Read lanes (so `unreadDays`, the read
+//   lane's days and its cap already apply) and the alert threads, each its own item. An alert group
+//   is a panel idea; the feed has no groups, so the group's threads are items labelled `alert` and
+//   `alert:<name>`. Triage verdicts stay in this plugin's lanes: the feed carries facts, and Inbox's
+//   rules decide what matters.
+// - `rev` is the id of the newest message, so a new reply changes it; marking read does not.
+// - `diffFeed` is how events are made: after each poll and each mark the host compares the list with
+//   what it last told and emits `item` for any changed field and `gone` for a missing id.
+// - Plain data only (the registry copies it with structuredClone); every string is cut to the
+//   contract's caps here too, since Inbox treats a source as untrusted.
 
-const { cut, oneLine, rowId } = require('./util')
-const { addressedTo } = require('./model')
-const { groupTitle } = require('./alerts')
+const { cut, oneLine } = require('./util')
+const { addressedTo, threadFacts } = require('./model')
 
 const DESCRIBE = Object.freeze({ label: 'Mail', badge: 'MAIL', color: 'red', kind: 'mail' })
-const FEATURES = Object.freeze(['markRead', 'recent', 'markUnread'])
-const LEVEL_RANK = { urgent: 0, action: 1, fyi: 2, noise: 3 }
-const LIMIT = { def: 20, min: 1, max: 50 }
-const CUTS = { title: 300, from: 200, where: 60 }
-const LANE_TITLE = { unread: 'Unread', alerts: 'Alerts', read: 'Read' }
+const FEATURES = Object.freeze([])
+const MAX_ITEMS = 1000
+const MAX_GONE = 500
+const CUTS = { title: 300, preview: 1000, name: 120, address: 254, label: 40, labels: 20, scope: 120, message: 300 }
+const ACTION_LABELS = { open: 'Open', markRead: 'Mark read', markUnread: 'Mark unread' }
+const PLACE = Object.freeze({ kind: 'folder', name: 'Inbox' })
 
-/** The feed level of a row: its verdict's priority when it is one of the four, else `fyi`. */
-function levelOf(row) {
-  const p = row.verdict && row.verdict.priority
-  // hasOwn, not `in`: a verdict of "constructor" must not pass as a level.
-  return typeof p === 'string' && Object.hasOwn(LEVEL_RANK, p) ? p : 'fyi'
+/** `scope` of describe(): what the feed holds, from the settings (a hidden lane is not in it). */
+function scopeLine(cfg) {
+  const lanes = (cfg && cfg.lanes) || {}
+  const parts = []
+  if (lanes.unread !== false || (lanes.alerts !== false && cfg && cfg.alertSenders && cfg.alertSenders.length)) parts.push(`unread of the last ${cfg.unreadDays} days`)
+  if (lanes.read !== false) parts.push(`read of the last ${cfg.readDays} days`)
+  return cut(parts.length ? parts.join(' + ') : 'nothing (every lane is off)', CUTS.scope)
+}
+
+/** Label names a person's rules can use: system labels as flags, user labels by name, the rest left out. */
+function labelsOf(thread, names) {
+  const ids = new Set()
+  for (const m of thread.messages || []) for (const l of m.labels || []) ids.add(l)
+  const out = []
+  for (const id of ids) {
+    if (id === 'IMPORTANT') out.push('important')
+    else if (id === 'STARRED') out.push('starred')
+    else if (id.startsWith('CATEGORY_')) out.push(`category:${id.slice(9).toLowerCase()}`)
+    else if (id.startsWith('Label_') && names && names[id]) out.push(oneLine(names[id]))
+  }
+  return out
 }
 
 /**
- * One view row as a FeedItem.
- * @param {object} row poll.buildView's row
- * @param {{ me?: string, jiraKeys?: Map<string, string> }} o the person's address; row id -> issue key
+ * One cached thread as a FeedItem.
+ * @param {object} thread model.compactThread's thread
+ * @param {{ me?: string, jiraKeys?: Map<string, string>, labelNames?: Record<string, string>, alert?: string | true }} o
+ *   `alert`: the thread is in the Alerts lane (its alert name, or true for a plain alert-sender thread)
+ * @returns {object | null} null for a thread with no message
  */
-function feedItem(row, o = {}) {
-  const base = { id: row.id, where: LANE_TITLE[row.lane] || cut(String(row.lane || ''), CUTS.where), at: row.at || 0, level: levelOf(row), unread: Boolean(row.unread) }
-  if (row.kind === 'alert') {
-    const g = row.group
-    return { ...base, rev: String(g.latest.id), title: cut(oneLine(groupTitle(g)), CUTS.title), from: cut(g.latest.from || g.latest.address || '', CUTS.from), direct: false }
+function threadItem(thread, o = {}) {
+  const facts = threadFacts(thread, o.me || '')
+  if (!facts) return null
+  const { lead, latest } = facts
+  const labels = labelsOf(thread, o.labelNames)
+  if (o.alert) {
+    labels.push('alert')
+    if (typeof o.alert === 'string') labels.push(`alert:${o.alert}`)
   }
-  const f = row.facts
+  const key = o.jiraKeys && o.jiraKeys.get(thread.id)
+  if (key) labels.push(`jira:${key}`)
   const item = {
-    ...base,
-    rev: String(f.latest.id),
-    title: cut(oneLine(f.subject), CUTS.title),
-    from: cut(f.lead.from || f.lead.address || '', CUTS.from),
-    direct: addressedTo([f.lead], o.me || '') === 'to',
+    id: thread.id,
+    rev: String(latest.id),
+    title: cut(oneLine(facts.subject), CUTS.title) || '(no subject)',
+    time: Math.max(1, Number(latest.at) || 0),
+    read: !facts.unread,
+    place: { ...PLACE },
+    actions: [{ id: 'open', label: ACTION_LABELS.open }, facts.unread ? { id: 'markRead', label: ACTION_LABELS.markRead } : { id: 'markUnread', label: ACTION_LABELS.markUnread }],
   }
-  const key = o.jiraKeys && o.jiraKeys.get(row.id)
-  if (key) item.jiraKey = key
+  const preview = cut(oneLine(latest.snippet || ''), CUTS.preview)
+  if (preview) item.preview = preview
+  const from = {}
+  if (lead.from) from.name = cut(lead.from, CUTS.name)
+  if (lead.address) from.address = cut(lead.address, CUTS.address)
+  if (from.name || from.address) item.from = from
+  const to = addressedTo([lead], o.me || '')
+  if (to === 'to') item.to = 'direct'
+  else if (to === 'cc') item.to = 'cc'
+  else if (to === 'other') item.to = 'group'
+  const seen = new Set()
+  const clean = []
+  for (const l of labels) {
+    const s = cut(oneLine(l), CUTS.label)
+    if (s && !seen.has(s.toLowerCase())) {
+      seen.add(s.toLowerCase())
+      clean.push(s)
+    }
+  }
+  if (clean.length) item.labels = clean.slice(0, CUTS.labels)
   return item
 }
 
-/** The limit of a call: the default when absent, else clamped to 1..50; anything but an object throws. */
-function feedLimit(arg) {
-  if (arg === undefined || arg === null) return LIMIT.def
-  if (typeof arg !== 'object' || Array.isArray(arg)) throw new Error('gmail: items takes an object ({ limit })')
-  const n = Math.floor(Number(arg.limit))
-  if (arg.limit === undefined || arg.limit === null || !Number.isFinite(n)) return LIMIT.def
-  return Math.min(LIMIT.max, Math.max(LIMIT.min, n))
+/**
+ * The whole scope as items, newest first (then the id, a stable order), at most `limit`
+ * (default 1000, the contract's cap; `act` passes Infinity to check an id against everything).
+ * @param {object[]} rows poll.allRows(view)
+ * @param {{ me?: string, jiraKeys?: Map<string, string>, labelNames?: Record<string, string>, threads?: Record<string, object>, limit?: number }} o
+ *   `threads`: the (mark-overlaid) cached threads, to find the threads of an alert group
+ */
+function feedItems(rows, o = {}) {
+  const byId = new Map()
+  const add = (thread, extra) => {
+    const it = thread && thread.id && !byId.has(thread.id) ? threadItem(thread, { ...o, ...extra }) : null
+    if (it) byId.set(it.id, it)
+  }
+  for (const r of rows) {
+    if (r.kind === 'alert') {
+      for (const tid of r.group.threadIds || []) add(o.threads && o.threads[tid], { alert: r.group.name })
+    } else {
+      add(r.thread, { alert: r.lane === 'alerts' ? true : undefined })
+    }
+  }
+  const limit = o.limit === undefined ? MAX_ITEMS : o.limit
+  return [...byId.values()].sort((a, b) => b.time - a.time || (a.id < b.id ? -1 : 1)).slice(0, limit)
+}
+
+/** JSON with sorted keys: two items are the same when this is. */
+function stable(v) {
+  if (Array.isArray(v)) return `[${v.map(stable).join(',')}]`
+  if (v && typeof v === 'object') return `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${stable(v[k])}`).join(',')}}`
+  return JSON.stringify(v)
 }
 
 /**
- * The items, best first: unread rows by level, then the newest, noise only when nothing else is
- * left, at most `limit`.
- * @param {object[]} rows poll.allRows(view)
- * @param {{ limit: number, me?: string, jiraKeys?: Map<string, string> }} o
+ * What changed between the list last told and the list now.
+ * @param {object[] | Map<string, object>} prev items last told
+ * @param {object[]} next items now
+ * @returns {{ items: object[], gone: string[] }} `items`: new or changed (any field), `gone`: ids missing now
  */
-function feedItems(rows, o) {
-  const all = rows
-    .filter((r) => r.unread)
-    .map((r) => feedItem(r, o))
-    .sort((a, b) => LEVEL_RANK[a.level] - LEVEL_RANK[b.level] || b.at - a.at || (a.id < b.id ? -1 : 1))
-  const real = all.filter((i) => i.level !== 'noise')
-  return (real.length ? real : all).slice(0, o.limit)
+function diffFeed(prev, next) {
+  const before = prev instanceof Map ? prev : new Map((prev || []).map((i) => [i.id, i]))
+  const now = new Set(next.map((i) => i.id))
+  const items = next.filter((i) => !before.has(i.id) || stable(before.get(i.id)) !== stable(i))
+  const gone = [...before.keys()].filter((id) => !now.has(id))
+  return { items, gone }
 }
 
-/**
- * The recently read items: threads of the Read lane that are read, newest message first (then the
- * id, a stable order), at most `limit`. No level order and no noise rule: a history, not a queue.
- * An alert group is never in the Read lane (the poll leaves alert senders out of it).
- * @param {object[]} rows poll.allRows(view)
- * @param {{ limit: number, me?: string, jiraKeys?: Map<string, string> }} o
- */
-function recentItems(rows, o) {
-  return rows
-    .filter((r) => r.lane === 'read' && r.kind === 'thread' && !r.unread)
-    .map((r) => feedItem(r, o))
-    .sort((a, b) => b.at - a.at || (a.id < b.id ? -1 : 1))
-    .slice(0, o.limit)
+/** `gone` ids in the events' bound (1-500 per event). */
+function goneChunks(ids) {
+  const out = []
+  for (let i = 0; i < ids.length; i += MAX_GONE) out.push(ids.slice(i, i + MAX_GONE))
+  return out
 }
 
-/** The id of open() / markRead(): a thread id or `alert:<name>` as a string, else it throws. */
-function feedId(value) {
-  if (typeof value !== 'string' || !rowId(value)) throw new Error('gmail: not a thread id')
-  return value
-}
-
-module.exports = { DESCRIBE, FEATURES, LIMIT, feedItem, feedItems, recentItems, feedLimit, feedId, levelOf }
+module.exports = { DESCRIBE, FEATURES, MAX_ITEMS, MAX_GONE, ACTION_LABELS, scopeLine, threadItem, feedItems, diffFeed, goneChunks }

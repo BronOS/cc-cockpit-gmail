@@ -262,17 +262,21 @@ talks to Jira itself, and nothing needs setting up in the Gmail plugin.
 
 ## Inbox
 
-Since 0.4.0 the plugin provides the `inbox-feed` service (v1) for the Inbox plugin, which merges
-Chat, Mail and Jira into one list. It answers from the threads the panel already holds, never with a
-Gmail call: your **unread** threads (and alert groups), best first by the plugin's own triage
-(urgent, action, fyi; noise only when nothing else is left), each with the id of its newest message,
-so a new reply brings a thread back in Inbox. Inbox can open a thread (the same as a click on its
-row) and mark it read (the same write as Mark read). The optional `recent` method (announced
-through `features()`) lists the read threads of the Read lane, newest first, from the same cache, so
-Inbox can reopen one; opening it marks nothing read here. The optional `markUnread` method is the panel's own Mark unread,
-so Inbox can offer it on those read rows. Mail from Jira carries its issue key. Nothing
-leaves your machine: the data goes to another plugin of the same project. It works with any
-cc-cockpit that has plugin services; Inbox itself needs 0.9.7.
+Since 0.5.0 the plugin provides the `inbox-feed` service (v2) for the Inbox plugin, which merges
+Chat, Mail, Jira and more into one list and applies its own rules. The feed is the plugin's scope:
+the **unread and read threads of the last days** (the Unread lane's days, the Read lane's days
+and cap; the lanes you switched off are not in it) and the **alert threads**, each its own item
+(an alert group is a panel idea). Each item carries what rules can use: subject, a preview, the
+lead sender, whether you are in To or Cc, read or unread, the Inbox folder, labels (your Gmail
+label names, `important`, `starred`, `category:updates`, `alert`, `alert:<name>`, `jira:ABC-12`)
+and the actions open, mark read / mark unread. The triage verdicts of the panel stay in the panel.
+It is built from the threads the panel already holds, never with a Gmail call. The plugin tells
+Inbox what changed after each poll and each mark (an `item` per changed thread, `gone` for a
+thread that left the scope) and sends the whole list when it starts, after a sign-in and after an
+error is over. Inbox can open a thread (the same as a click on its row) and mark it read or
+unread (the same write as Mark read). The panel's footer shows the scope line Inbox sees. Nothing
+leaves your machine: the data goes to another plugin of the same project. Inbox 0.2.0 reads v2; an
+older Inbox (v1) no longer gets Mail from this version.
 
 ## CLI
 

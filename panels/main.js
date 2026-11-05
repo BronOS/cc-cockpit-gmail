@@ -266,7 +266,7 @@ function renderFooter() {
   if (state.tooOld || !state.auth || !state.auth.signedIn) return
   const w = state.write
   const writes = !w || !w.allowed ? 'Read-only for now (sign in again to mark mail read).' : w.markReadOnOpen ? 'Opening a thread marks it read in Gmail.' : 'Opening a thread leaves it unread (markReadOnOpen is off).'
-  f.append(el('span', { text: `${writes} The plugin changes only the read state: it never archives, labels, trashes or sends. ${state.account ? `Signed in as ${state.account}` : 'Signed in'}${state.auth.sessionOnly ? ' (until the app closes)' : ''}. ` }))
+  f.append(el('span', { text: `${state.scope ? `Inbox sees: ${state.scope}. ` : ''}${writes} The plugin changes only the read state: it never archives, labels, trashes or sends. ${state.account ? `Signed in as ${state.account}` : 'Signed in'}${state.auth.sessionOnly ? ' (until the app closes)' : ''}. ` }))
   f.append(button('Sign out', () => post('signOut'), 'Deletes the stored Google sign-in of this project', 'link'))
 }
 

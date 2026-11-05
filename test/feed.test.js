@@ -1,7 +1,8 @@
 'use strict'
-// The `inbox-feed` service (0.4.0): the pure mapping (levels, rev, caps, ordering, the noise rule),
-// the host's answers from its cache in each state, open / markRead with a bad id, `changed` after a
-// poll and a read change, the Jira key passed through, and an app without `useAll` (before 0.9.7).
+// The `inbox-feed` service (v2, 0.5.0): the pure mapping (fields, labels, caps, alert threads, the
+// diff), the host's snapshot from its cache in each state, act with a foreign id or an action the
+// item lacks, the item / gone / sync events after a poll, a mark, a sign-in and an error, and an app
+// without `useAll`, `slots` or `overlay.buttons` (an older app).
 const test = require('node:test')
 const assert = require('node:assert/strict')
 const host = require('../dist/host')
@@ -12,104 +13,112 @@ const CLIENT_FILE = JSON.stringify(fixture('client_secret.json'))
 
 // ---- lib/feed.js ----
 
-const msgOf = (o) => ({ id: 'm0', address: 'ann@example.com', from: 'Ann Smith', to: `Me <${ME}>`, cc: '', subject: 'Hello', snippet: '', unread: true, at: NOW, ...o })
-function threadRow(id, o = {}) {
-  const lead = msgOf({ ...o.lead })
-  const latest = msgOf({ id: 'newest', ...o.latest })
-  return { id, kind: 'thread', lane: o.lane || 'unread', at: o.at === undefined ? NOW : o.at, unread: o.unread !== false, verdict: o.verdict === undefined ? { priority: 'action' } : o.verdict, thread: { id, messages: [lead, latest] }, facts: { lead, latest, subject: lead.subject, unread: true, count: 2, at: latest.at, participants: [] } }
+const msgOf = (o) => ({ id: 'm0', address: 'ann@example.com', from: 'Ann Smith', to: `Me <${ME}>`, cc: '', subject: 'Hello', snippet: '', unread: true, at: NOW, labels: ['INBOX', 'UNREAD'], ...o })
+function thread(id, o = {}) {
+  return { id, messages: [msgOf({ id: 'm1', ...o.first }), msgOf({ id: 'newest', ...o.latest })] }
 }
+const threadRow = (id, o = {}) => ({ id, kind: 'thread', lane: o.lane || 'unread', at: NOW, unread: true, verdict: null, thread: thread(id, o) })
 
-test('feedItem: every field of the contract, rev is the newest message, from the lead', () => {
-  const r = threadRow('t1', { lead: { id: 'm1', subject: 'Re: Q4   budget', from: 'Ann Smith' }, latest: { id: 'm9' }, at: NOW - 5 })
-  assert.deepEqual(F.feedItem(r, { me: ME }), { id: 't1', where: 'Unread', at: NOW - 5, level: 'action', unread: true, rev: 'm9', title: 'Re: Q4 budget', from: 'Ann Smith', direct: true })
+test('threadItem: every field of the contract; rev is the newest message, from the lead', () => {
+  const t = thread('t1', { first: { subject: 'Re: Q4   budget', from: 'Ann Smith' }, latest: { subject: 'Re: Q4   budget', from: 'Ann Smith', id: 'm9', snippet: 'See  the\nnumbers', at: NOW - 5, labels: ['INBOX', 'UNREAD', 'IMPORTANT', 'STARRED', 'CATEGORY_UPDATES', 'Label_7', 'SENT'] } })
+  const it = F.threadItem(t, { me: ME, labelNames: { Label_7: 'Projects/Q4' } })
+  assert.deepEqual(it, {
+    id: 't1',
+    rev: 'm9',
+    title: 'Re: Q4 budget',
+    time: NOW - 5,
+    read: false,
+    place: { kind: 'folder', name: 'Inbox' },
+    actions: [{ id: 'open', label: 'Open' }, { id: 'markRead', label: 'Mark read' }],
+    preview: 'See the numbers',
+    from: { name: 'Ann Smith', address: 'ann@example.com' },
+    to: 'direct',
+    labels: ['important', 'starred', 'category:updates', 'Projects/Q4'],
+  })
 })
 
-test('feedItem: levels come from the verdict; no verdict or an unknown one is fyi', () => {
-  for (const p of ['urgent', 'action', 'fyi', 'noise']) assert.equal(F.feedItem(threadRow('t', { verdict: { priority: p } })).level, p)
-  assert.equal(F.feedItem(threadRow('t', { verdict: null })).level, 'fyi')
-  assert.equal(F.feedItem(threadRow('t', { verdict: { priority: 'constructor' } })).level, 'fyi')
+test('threadItem: a read thread offers markUnread; to is direct, cc or group; unknown without the person\'s address', () => {
+  const read = thread('t', { first: { unread: false }, latest: { unread: false } })
+  const it = F.threadItem(read, { me: ME })
+  assert.equal(it.read, true)
+  assert.deepEqual(it.actions.map((a) => a.id), ['open', 'markUnread'])
+  assert.equal(F.threadItem(thread('t', { latest: { to: 'Bob <bob@example.com>', cc: ME } }), { me: ME }).to, 'cc')
+  assert.equal(F.threadItem(thread('t', { latest: { to: 'list@example.com' } }), { me: ME }).to, 'group')
+  assert.ok(!('to' in F.threadItem(thread('t'), { me: '' })))
+  assert.ok(!('mentionsMe' in it))
+  assert.equal(F.threadItem({ id: 'x', messages: [] }), null)
 })
 
-test('feedItem: direct only when the person is in To (not Cc, not a list), case-insensitive', () => {
-  assert.equal(F.feedItem(threadRow('t', { lead: { to: 'Me <ME@example.com>' } }), { me: ME }).direct, true)
-  assert.equal(F.feedItem(threadRow('t', { lead: { to: 'Bob <bob@example.com>', cc: ME } }), { me: ME }).direct, false)
-  assert.equal(F.feedItem(threadRow('t', { lead: { to: 'list@example.com' } }), { me: ME }).direct, false)
-  assert.equal(F.feedItem(threadRow('t'), { me: '' }).direct, false)
-  assert.ok(!('mentionsMe' in F.feedItem(threadRow('t'), { me: ME })))
+test('threadItem: caps (title 300, preview 1000, name 120, labels 20 of 40), unknown user labels dropped, jira and alert labels added, no duplicates', () => {
+  const ids = Array.from({ length: 30 }, (_, k) => `Label_${k}`)
+  const names = Object.fromEntries(ids.map((id, k) => [id, `${k % 2 ? 'x' : 'y'}`.repeat(60) + k]))
+  const t = thread('t', { first: { subject: 's'.repeat(1000), from: 'f'.repeat(500) }, latest: { snippet: 'p'.repeat(5000), labels: [...ids, 'Label_unknown'] } })
+  const it = F.threadItem(t, { me: ME, labelNames: names, jiraKeys: new Map([['t', 'ABC-2']]), alert: 'HighCPU' })
+  assert.ok(it.title.length <= 300 && it.preview.length <= 1000 && it.from.name.length <= 120)
+  assert.ok(it.labels.length <= 20 && it.labels.every((l) => l.length >= 1 && l.length <= 40))
+  const small = F.threadItem(thread('t', { latest: { labels: ['INBOX', 'IMPORTANT', 'UNREAD'] } }), { me: ME, jiraKeys: new Map([['t', 'ABC-2']]), alert: 'HighCPU' })
+  assert.deepEqual(small.labels, ['important', 'alert', 'alert:HighCPU', 'jira:ABC-2'])
+  assert.deepEqual(F.threadItem(thread('t'), { me: ME, alert: true }).labels, ['alert'])
 })
 
-test('feedItem: jiraKey only from the host\'s map; long texts are cut', () => {
-  const r = threadRow('t', { lead: { subject: 'x'.repeat(1000), from: 'y'.repeat(1000) } })
-  const it = F.feedItem(r, { me: ME, jiraKeys: new Map([['t', 'ABC-2']]) })
-  assert.equal(it.jiraKey, 'ABC-2')
-  assert.ok(it.title.length <= 300 && it.from.length <= 200)
-  assert.ok(!('jiraKey' in F.feedItem(r, { me: ME, jiraKeys: new Map() })))
-})
-
-test('feedItem: an alert group has its newest alert as rev, a title, and is never direct', () => {
-  const g = { id: 'alert:HighCPU', name: 'HighCPU', nodes: ['n1'], count: 3, firing: 2, resolved: false, at: NOW, threadIds: ['a'], latest: msgOf({ id: 'al9', from: 'Grafana', subject: '[FIRING:2] HighCPU' }) }
-  const it = F.feedItem({ id: g.id, kind: 'alert', lane: 'alerts', at: NOW, unread: true, verdict: { priority: 'noise' }, group: g }, { me: ME })
-  assert.equal(it.rev, 'al9')
-  assert.equal(it.where, 'Alerts')
-  assert.equal(it.level, 'noise')
-  assert.equal(it.direct, false)
-  assert.match(it.title, /HighCPU/)
-})
-
-test('feedItems: best level first, then newest; read threads are not items', () => {
+test('feedItems: threads of every lane, an alert group as one item per thread, newest first, deduplicated, limit cuts', () => {
+  const group = { id: 'alert:HighCPU', name: 'HighCPU', threadIds: ['a1', 'a2'] }
   const rows = [
-    threadRow('f-old', { verdict: { priority: 'fyi' }, at: 1 }),
-    threadRow('a-old', { at: 5 }),
-    threadRow('u', { verdict: { priority: 'urgent' }, at: 2 }),
-    threadRow('a-new', { at: 9 }),
-    threadRow('read', { unread: false, verdict: { priority: 'urgent' } }),
+    threadRow('old', { latest: { at: 1 } }),
+    threadRow('read', { lane: 'read', first: { unread: false }, latest: { unread: false, at: 50 } }),
+    { id: group.id, kind: 'alert', lane: 'alerts', at: NOW, unread: true, group },
+    threadRow('plain-alert', { lane: 'alerts', latest: { at: 7 } }),
   ]
-  assert.deepEqual(F.feedItems(rows, { limit: 50 }).map((i) => i.id), ['u', 'a-new', 'a-old', 'f-old'])
+  const threads = { a1: thread('a1', { latest: { at: 100 } }), a2: thread('a2', { latest: { at: 90 } }), gone: thread('gone') }
+  const out = F.feedItems(rows, { me: ME, threads })
+  assert.deepEqual(out.map((i) => i.id), ['a1', 'a2', 'read', 'plain-alert', 'old'])
+  assert.deepEqual(out[0].labels, ['alert', 'alert:HighCPU'])
+  assert.deepEqual(out[3].labels, ['alert'])
+  assert.equal(out[2].read, true)
+  assert.equal(F.feedItems(rows, { me: ME, threads, limit: 2 }).length, 2)
+  assert.deepEqual(F.feedItems([rows[0], rows[0]], { me: ME }).length, 1)
+  const noThread = F.feedItems([rows[2]], { me: ME, threads: {} })
+  assert.deepEqual(noThread, [])
+  assert.equal(F.feedItems(Array.from({ length: 1200 }, (_, k) => threadRow(`t${k}`, { latest: { at: k + 1 } })), { me: ME }).length, 1000)
 })
 
-test('feedItems: noise is left out unless nothing else is left; limit cuts', () => {
-  const noise = (id) => threadRow(id, { verdict: { priority: 'noise' } })
-  assert.deepEqual(F.feedItems([noise('n1'), threadRow('a')], { limit: 5 }).map((i) => i.id), ['a'])
-  assert.deepEqual(F.feedItems([noise('n1'), noise('n2')], { limit: 5 }).map((i) => i.id).sort(), ['n1', 'n2'])
-  assert.deepEqual(F.feedItems([], { limit: 5 }), [])
-  const many = Array.from({ length: 10 }, (_, k) => threadRow(`t${k}`, { at: k }))
-  assert.equal(F.feedItems(many, { limit: 3 }).length, 3)
-})
-
-test('recentItems: read threads of the Read lane only, newest first, same FeedItem, limit cuts', () => {
-  const rows = [
-    threadRow('r-old', { lane: 'read', unread: false, at: 1 }),
-    threadRow('r-new', { lane: 'read', unread: false, at: 9, verdict: { priority: 'noise' } }),
-    threadRow('r-tie-b', { lane: 'read', unread: false, at: 5 }),
-    threadRow('r-tie-a', { lane: 'read', unread: false, at: 5 }),
-    threadRow('unread', { lane: 'unread', at: 99 }),
-    threadRow('marked-here', { lane: 'unread', unread: false, at: 98 }),
-    threadRow('read-flagged-unread', { lane: 'read', unread: true, at: 97 }),
-    { id: 'alert:X', kind: 'alert', lane: 'read', at: 96, unread: false, group: { latest: msgOf({ id: 'al' }) } },
+test('diffFeed: new and changed (each field) are items, missing ids are gone, a no-op is nothing', () => {
+  const base = F.threadItem(thread('t', { latest: { snippet: 'a' } }), { me: ME })
+  const other = F.threadItem(thread('u'), { me: ME })
+  assert.deepEqual(F.diffFeed([base, other], [base, other]), { items: [], gone: [] })
+  assert.deepEqual(F.diffFeed([], [base]), { items: [base], gone: [] })
+  assert.deepEqual(F.diffFeed(new Map([['t', base], ['u', other]]), [base]), { items: [], gone: ['u'] })
+  const changes = [
+    (i) => ({ ...i, rev: 'zz' }),
+    (i) => ({ ...i, title: 'new' }),
+    (i) => ({ ...i, preview: 'new' }),
+    (i) => ({ ...i, time: i.time + 1 }),
+    (i) => ({ ...i, read: !i.read }),
+    (i) => ({ ...i, to: 'cc' }),
+    (i) => ({ ...i, labels: ['starred'] }),
+    (i) => ({ ...i, from: { name: 'Bob' } }),
+    (i) => ({ ...i, actions: [{ id: 'open', label: 'Open' }] }),
+    (i) => ({ ...i, place: { kind: 'folder', name: 'Other' } }),
   ]
-  const out = F.recentItems(rows, { limit: 50, me: ME })
-  assert.deepEqual(out.map((i) => i.id), ['r-new', 'r-tie-a', 'r-tie-b', 'r-old'])
-  assert.deepEqual(out[0], F.feedItem(rows[1], { me: ME }), 'the same mapping as items')
-  assert.equal(out.every((i) => i.unread === false && i.where === 'Read'), true)
-  assert.equal(F.recentItems(rows, { limit: 2 }).length, 2)
-  assert.deepEqual(F.recentItems([], { limit: 5 }), [])
+  for (const mutate of changes) {
+    const next = mutate(base)
+    assert.deepEqual(F.diffFeed([base], [next]), { items: [next], gone: [] })
+  }
+  // key order does not matter
+  const reordered = Object.fromEntries(Object.entries(base).reverse())
+  assert.deepEqual(F.diffFeed([base], [reordered]).items, [])
 })
 
-test('feedLimit: default 20, clamped to 1..50, a non-object is refused', () => {
-  assert.equal(F.feedLimit(undefined), 20)
-  assert.equal(F.feedLimit({}), 20)
-  assert.equal(F.feedLimit({ limit: 0 }), 1)
-  assert.equal(F.feedLimit({ limit: -4 }), 1)
-  assert.equal(F.feedLimit({ limit: 9999 }), 50)
-  assert.equal(F.feedLimit({ limit: 7.9 }), 7)
-  assert.equal(F.feedLimit({ limit: 'abc' }), 20)
-  for (const bad of [5, 'x', [3], true]) assert.throws(() => F.feedLimit(bad), /^Error: gmail: /)
+test('goneChunks: at most 500 ids to an event', () => {
+  assert.deepEqual(F.goneChunks([]), [])
+  assert.deepEqual(F.goneChunks(Array.from({ length: 1001 }, (_, k) => String(k))).map((c) => c.length), [500, 500, 1])
 })
 
-test('feedId: strings of the thread-id or alert shape only', () => {
-  assert.equal(F.feedId(T.t1), T.t1)
-  assert.equal(F.feedId('alert:HighCPU'), 'alert:HighCPU')
-  for (const bad of [undefined, null, 5, {}, '', '../x', 'a/b', 'a?b', 'alert:', 'x'.repeat(65)]) assert.throws(() => F.feedId(bad), /^Error: gmail: not a thread id/)
+test('scopeLine: from the settings, a hidden lane left out, at most 120 characters', () => {
+  assert.equal(F.scopeLine({ lanes: { unread: true, alerts: true, read: true }, unreadDays: 14, readDays: 2, alertSenders: [] }), 'unread of the last 14 days + read of the last 2 days')
+  assert.equal(F.scopeLine({ lanes: { unread: true, read: false }, unreadDays: 3, readDays: 2, alertSenders: [] }), 'unread of the last 3 days')
+  assert.equal(F.scopeLine({ lanes: { unread: false, alerts: false, read: true }, unreadDays: 3, readDays: 2, alertSenders: [] }), 'read of the last 2 days')
+  assert.match(F.scopeLine({ lanes: { unread: false, alerts: false, read: false }, unreadDays: 3, readDays: 2 }), /^nothing/)
 })
 
 // ---- the host ----
@@ -165,270 +174,226 @@ async function signedIn(opts) {
   return b
 }
 
-test('the plugin provides inbox-feed with the contract\'s methods and describes itself', async () => {
-  const { feed, h } = boot()
-  assert.deepEqual(Object.keys(feed).sort(), ['describe', 'features', 'items', 'markRead', 'markUnread', 'open', 'recent'])
-  assert.deepEqual(await feed.describe(), { label: 'Mail', badge: 'MAIL', color: 'red', kind: 'mail' })
-  assert.deepEqual(await feed.features(), ['markRead', 'recent', 'markUnread'])
+
+const lastOf = (b, ev) => b.ctx.emitted.filter((e) => e.event === ev)
+const events = (b) => b.ctx.emitted.filter((e) => e.name === 'inbox-feed')
+
+test('the plugin provides inbox-feed v2 with the contract\'s methods and describes itself with its scope', async () => {
+  const { feed, h } = boot({ project: { unreadDays: 7, readDays: 3 } })
+  assert.deepEqual(Object.keys(feed).sort(), ['act', 'describe', 'features', 'snapshot'])
+  assert.deepEqual(await feed.describe(), { label: 'Mail', badge: 'MAIL', color: 'red', kind: 'mail', scope: 'unread of the last 7 days + read of the last 3 days' })
+  assert.deepEqual(await feed.features(), [])
   await h.stop()
 })
 
-test('items, signed in: unread mail best first from the cache, the Read lane and the noisy alert group left out, no extra API call', async () => {
+test('snapshot, signed in: the unread and read threads and the alert threads from the cache, no API call, plain data', async () => {
   const { feed, gmail, h } = await signedIn()
   const calls = gmail.calls.length
-  const r = await feed.items({ limit: 50 })
+  const r = await feed.snapshot()
   assert.equal(gmail.calls.length, calls, 'answered from the cache')
   assert.equal(r.state, 'ok')
   assert.equal(r.message, undefined)
   assert.equal(r.asOf, NOW)
-  const ids = r.items.map((i) => i.id)
-  assert.ok(ids.includes(T.t1) && ids.includes(T.t2))
-  assert.ok(!ids.includes(T.t3), 'a read thread is not an item')
-  assert.ok(!ids.includes('alert:HighCPU'), 'noise is left out while there is mail')
-  const t1 = r.items.find((i) => i.id === T.t1)
-  assert.equal(t1.rev, '18f0a1b2c3d4e503', 'the newest message of the thread')
-  assert.equal(t1.title, 'Re: Q4 budget')
-  assert.equal(t1.from, 'Ann Smith')
-  assert.equal(t1.where, 'Unread')
-  assert.equal(t1.level, 'action')
-  assert.equal(t1.unread, true)
-  assert.equal(t1.direct, true)
-  assert.ok(Number.isFinite(t1.at) && t1.at > 0)
-  assert.equal((await feed.items({ limit: 1 })).items.length, 1)
-  await h.stop()
-})
-
-test('items: the answer is plain data; a bad argument is refused', async () => {
-  const { feed, h } = await signedIn()
-  const r = await feed.items()
   assert.deepEqual(r, structuredClone(r))
-  await assert.rejects(feed.items('all'), /^Error: gmail: items takes an object/)
+  const byId = Object.fromEntries(r.items.map((i) => [i.id, i]))
+  for (const id of [T.t1, T.t2, T.t3, T.a1, T.a2, T.a3]) assert.ok(byId[id], id)
+  assert.ok(!('alert:HighCPU' in byId), 'no alert groups in the feed')
+  assert.equal(byId[T.t1].rev, '18f0a1b2c3d4e503', 'the newest message of the thread')
+  assert.equal(byId[T.t1].title, 'Re: Q4 budget')
+  assert.equal(byId[T.t1].from.name, 'Ann Smith')
+  assert.equal(byId[T.t1].to, 'direct')
+  assert.equal(byId[T.t1].read, false)
+  assert.deepEqual(byId[T.t1].place, { kind: 'folder', name: 'Inbox' })
+  assert.ok(byId[T.t1].labels.includes('important'))
+  assert.equal(byId[T.t3].read, true)
+  assert.deepEqual(byId[T.t3].actions.map((a) => a.id), ['open', 'markUnread'])
+  assert.ok(byId[T.a1].labels.includes('alert') && byId[T.a1].labels.some((l) => l.startsWith('alert:')))
+  assert.ok(!byId[T.t1].labels.includes('alert'))
+  assert.ok(r.items.every((i) => i.time > 0))
+  assert.deepEqual(r.items.map((i) => i.time), [...r.items.map((i) => i.time)].sort((a, b) => b - a))
   await h.stop()
 })
 
-test('items, not set up or signed out: state signedOut with a message and no items', async () => {
+test('snapshot: user label names are read once a poll ends and join the labels', async () => {
+  const b = await signedIn()
+  await until(() => b.h.S.labels)
+  const t1 = (await b.feed.snapshot()).items.find((i) => i.id === T.t1)
+  assert.ok(t1.labels.length >= 2, 'a user label by name next to important')
+  await b.h.stop()
+})
+
+test('snapshot: a hidden Read lane leaves the read thread out; Jira mail carries jira:KEY', async () => {
+  const hidden = await signedIn({ project: { lanes: { read: false } } })
+  assert.ok(!(await hidden.feed.snapshot()).items.some((i) => i.id === T.t3))
+  await hidden.h.stop()
+  const b = await signedIn({ jira: true })
+  const it = (await b.feed.snapshot()).items.find((i) => i.id === ID.jira)
+  assert.ok(it.labels.includes('jira:ABC-2'))
+  await b.h.stop()
+})
+
+test('snapshot, not set up or signed out: state signedOut with a message and no items', async () => {
   const b = boot()
   await b.h.ready
-  const r = await b.feed.items({})
+  const r = await b.feed.snapshot()
   assert.equal(r.state, 'signedOut')
   assert.ok(r.message && r.message.length <= 300)
   assert.deepEqual(r.items, [])
   await b.h.stop()
 })
 
-test('items, signed out after having mail: the last cached items still come', async () => {
+test('snapshot, signed out after having mail: the last cached items still come; a failed poll gives error with them', async () => {
   const b = await signedIn()
-  assert.ok((await b.feed.items({})).items.length > 0)
-  // An expired grant signs out but keeps the cache (the lanes empty, the cache stays for a re-sign-in).
+  b.h.S.error = 'Gmail said:\nboom'
+  const e = await b.feed.snapshot()
+  assert.equal(e.state, 'error')
+  assert.equal(e.message, 'Gmail said: boom')
+  assert.ok(e.items.length > 0)
+  b.h.S.error = null
   b.h.auth.status = () => ({ signedIn: false, signedOutReason: 'Your Google sign-in expired.' })
-  const r = await b.feed.items({})
+  const r = await b.feed.snapshot()
   assert.equal(r.state, 'signedOut')
   assert.equal(r.message, 'Your Google sign-in expired.')
   assert.ok(r.items.length > 0)
   await b.h.stop()
 })
 
-test('items, the last poll failed: state error with its message, the cached items still come', async () => {
+test('act refuses a foreign id, a bad argument and an action the item lacks; nothing reaches Gmail', async () => {
   const b = await signedIn()
-  b.h.S.error = 'Gmail said:\nboom'
-  const r = await b.feed.items({})
-  assert.equal(r.state, 'error')
-  assert.equal(r.message, 'Gmail said: boom')
-  assert.ok(r.items.length > 0)
-  await b.h.stop()
-})
-
-test('items: with only noise left, the noise comes', async () => {
-  const b = await signedIn({ gmail: { lists: { unread: [], alerts: [T.a1, T.a2], read: [] } } })
-  const r = await b.feed.items({})
-  assert.deepEqual(r.items.map((i) => [i.id, i.level]), [['alert:HighCPU', 'noise']])
-  await b.h.stop()
-})
-
-test('items: a Jira mail carries its issue key; other mail has none', async () => {
-  const b = await signedIn({ jira: true })
-  const r = await b.feed.items({})
-  assert.equal(r.items.find((i) => i.id === ID.jira).jiraKey, 'ABC-2')
-  assert.ok(!('jiraKey' in r.items.find((i) => i.id === T.t1)))
-  await b.h.stop()
-})
-
-test('items, triage off: every unread thread is fyi, still listed', async () => {
-  const b = await signedIn({ triage: null })
-  const r = await b.feed.items({})
-  assert.ok(r.items.length > 0 && r.items.every((i) => i.level === 'fyi'))
-  await b.h.stop()
-})
-
-const READ_LISTS = { unread: [T.t1, T.t2], alerts: [T.a1, T.a2, T.a3], read: [T.t3, T.c1] }
-
-test('recent, signed in: read threads of the Read lane from the cache, newest first, capped and clamped, no API call', async () => {
-  const { feed, gmail, h } = await signedIn({ gmail: { lists: READ_LISTS } })
-  const calls = gmail.calls.length
-  const r = await feed.recent({ limit: 50 })
-  assert.equal(gmail.calls.length, calls, 'answered from the cache')
-  assert.equal(r.state, 'ok')
-  assert.equal(r.message, undefined)
-  assert.equal(r.asOf, NOW)
-  const ids = r.items.map((i) => i.id)
-  assert.ok(ids.includes(T.t3), 'the read thread')
-  assert.ok(!ids.includes(T.t1) && !ids.includes(T.t2), 'unread threads are not recent')
-  assert.ok(!ids.some((id) => id.startsWith('alert:')))
-  assert.ok(r.items.every((i) => i.unread === false && i.where === 'Read'))
-  assert.deepEqual(r.items.map((i) => i.at), [...r.items.map((i) => i.at)].sort((a, b) => b - a))
-  assert.deepEqual(r, structuredClone(r))
-  for (const k of ['id', 'rev', 'title', 'from', 'where', 'at', 'level', 'unread', 'direct']) assert.ok(k in r.items[0], k)
-  const n = r.items.length
-  assert.ok(n >= 1)
-  assert.equal((await feed.recent({ limit: 1 })).items.length, 1)
-  assert.equal((await feed.recent({ limit: 0 })).items.length, 1)
-  assert.equal((await feed.recent({ limit: -3 })).items.length, 1)
-  assert.equal((await feed.recent({ limit: 999 })).items.length, n)
-  assert.equal((await feed.recent({ limit: 'junk' })).items.length, n)
-  assert.equal((await feed.recent()).items.length, n)
-  await assert.rejects(feed.recent('all'), /^Error: gmail: items takes an object/)
-  await h.stop()
-})
-
-test('recent: a hidden Read lane gives no items; not signed in gives signedOut; a failed poll gives error with the cached items', async () => {
-  const hidden = await signedIn({ project: { lanes: { read: false } } })
-  const r = await hidden.feed.recent({})
-  assert.deepEqual(r.items, [])
-  assert.equal(r.state, 'ok')
-  await hidden.h.stop()
-
-  const b0 = boot()
-  await b0.h.ready
-  const s = await b0.feed.recent({})
-  assert.equal(s.state, 'signedOut')
-  assert.ok(s.message && s.message.length <= 300)
-  assert.deepEqual(s.items, [])
-  await b0.h.stop()
-
-  const b = await signedIn()
-  b.h.S.error = 'Gmail said:\nboom'
-  const e = await b.feed.recent({})
-  assert.equal(e.state, 'error')
-  assert.equal(e.message, 'Gmail said: boom')
-  assert.ok(e.items.length > 0)
-  b.h.S.error = null
-  b.h.auth.status = () => ({ signedIn: false, signedOutReason: 'Your Google sign-in expired.' })
-  const o = await b.feed.recent({})
-  assert.equal(o.state, 'signedOut')
-  assert.ok(o.items.length > 0, 'the last cached read threads still come')
-  await b.h.stop()
-})
-
-test('every id recent returns opens through open (the Read lane needed no widening) and open marks nothing read', async () => {
-  const b = await signedIn({ gmail: { lists: READ_LISTS } })
-  const r = await b.feed.recent({ limit: 50 })
-  assert.ok(r.items.length > 0)
-  for (const it of r.items) {
-    const before = b.gmail.calls.length
-    await b.feed.open(it.id)
-    assert.ok(b.gmail.calls.slice(before).some((c) => c.path.endsWith(`/threads/${it.id}`) && /format=full/.test(c.url)), `${it.id} was read in full`)
+  const calls = b.gmail.calls.length
+  for (const bad of [undefined, null, 5, {}, '', '../x', 'alert:HighCPU', 'ffffffffffffffff']) {
+    const r = await b.feed.act(bad, 'markRead')
+    assert.equal(r.ok, false, String(bad))
+    assert.match(r.message, /^gmail: /)
   }
-  await b.h.writesIdle()
-  assert.deepEqual(b.gmail.state.modifies, [], 'nothing marked read')
-  await assert.rejects(b.feed.open('ffffffffffffffff'), /^Error: gmail: /)
+  assert.equal((await b.feed.act(T.t1, 'markUnread')).ok, false, 'an unread thread has no markUnread')
+  assert.equal((await b.feed.act(T.t3, 'markRead')).ok, false, 'a read thread has no markRead')
+  assert.equal((await b.feed.act(T.t1, 'done')).ok, false)
+  assert.equal((await b.feed.act(T.t1, 7)).ok, false)
+  assert.equal(b.gmail.calls.length, calls)
+  assert.deepEqual(b.gmail.state.modifies, [])
   await b.h.stop()
 })
 
-test('markRead on a read thread: refused or harmless, and it stays recent', async () => {
+test('act markRead: the existing write path (the UNREAD label), then the item is read; markUnread brings it back', async () => {
   const b = await signedIn()
-  await b.feed.markRead(T.t3).catch((e) => assert.match(e.message, /^gmail: /))
-  await b.h.writesIdle()
-  assert.ok((await b.feed.recent({})).items.some((i) => i.id === T.t3))
-  await b.h.stop()
-})
-
-test('markRead: the existing write path (the UNREAD label), the item leaves the feed, changed is emitted', async () => {
-  const b = await signedIn()
-  const before = b.ctx.emitted.length
-  await b.feed.markRead(T.t1)
+  const r = await b.feed.act(T.t1, 'markRead')
+  assert.deepEqual(r, { ok: true })
   await b.h.writesIdle()
   assert.deepEqual(b.gmail.state.modifies.map((m) => m.id), [T.t1])
   assert.deepEqual(b.gmail.state.modifies[0].body, { removeLabelIds: ['UNREAD'] })
-  assert.ok(!(await b.feed.items({})).items.some((i) => i.id === T.t1))
-  assert.ok(b.ctx.emitted.length > before)
-  assert.deepEqual(b.ctx.emitted[b.ctx.emitted.length - 1], { name: 'inbox-feed', event: 'changed', data: {} })
-  await b.h.stop()
-})
-
-test('markRead: a Gmail refusal is thrown as gmail: <why>, the item stays', async () => {
-  const b = await signedIn({ gmail: { fail: { [`modify:${T.t1}`]: 500 } } })
-  await assert.rejects(b.feed.markRead(T.t1), /^Error: gmail: /)
-  assert.ok((await b.feed.items({})).items.some((i) => i.id === T.t1))
-  await b.h.stop()
-})
-
-test('markUnread: a read thread goes through the panel write (UNREAD label), moves to items, changed is emitted', async () => {
-  const b = await signedIn()
-  const before = b.ctx.emitted.length
-  await b.feed.markUnread(T.t3)
+  const it = (await b.feed.snapshot()).items.find((i) => i.id === T.t1)
+  assert.equal(it.read, true)
+  assert.deepEqual(it.actions.map((a) => a.id), ['open', 'markUnread'])
+  assert.deepEqual(await b.feed.act(T.t3, 'markUnread'), { ok: true })
   await b.h.writesIdle()
-  assert.deepEqual(b.gmail.state.modifies.map((m) => m.id), [T.t3])
-  assert.deepEqual(b.gmail.state.modifies[0].body, { addLabelIds: ['UNREAD'] })
-  assert.ok((await b.feed.items({})).items.some((i) => i.id === T.t3))
-  assert.ok(!(await b.feed.recent({})).items.some((i) => i.id === T.t3))
-  assert.ok(b.ctx.emitted.length > before)
-  assert.deepEqual(b.ctx.emitted[b.ctx.emitted.length - 1], { name: 'inbox-feed', event: 'changed', data: {} })
+  assert.deepEqual(b.gmail.state.modifies[1].body, { addLabelIds: ['UNREAD'] })
   await b.h.stop()
 })
 
-test('markUnread: a Gmail refusal is thrown as gmail: <why>, the thread stays read', async () => {
-  const b = await signedIn({ gmail: { fail: { [`modify:${T.t3}`]: 500 } } })
-  await assert.rejects(b.feed.markUnread(T.t3), /^Error: gmail: /)
-  assert.ok((await b.feed.recent({})).items.some((i) => i.id === T.t3))
-  await b.h.stop()
-})
-
-test('markUnread with a bad id is refused before anything reaches Gmail', async () => {
+test('act markRead on a thread of an alert group works (the thread is its own item)', async () => {
   const b = await signedIn()
-  const calls = b.gmail.calls.length
-  for (const bad of [undefined, null, 5, {}, '', '../x', 'alert:', T.t3 + 'zz', 'ffffffffffffffff']) await assert.rejects(b.feed.markUnread(bad), /^Error: gmail: /, String(bad))
-  assert.equal(b.gmail.calls.length, calls)
-  assert.deepEqual(b.gmail.state.modifies, [])
+  assert.deepEqual(await b.feed.act(T.a1, 'markRead'), { ok: true })
+  await b.h.writesIdle()
+  assert.deepEqual(b.gmail.state.modifies.map((m) => m.id), [T.a1])
   await b.h.stop()
 })
 
-test('open and markRead with a bad id are refused before anything reaches Gmail', async () => {
-  const b = await signedIn()
-  const calls = b.gmail.calls.length
-  for (const bad of [undefined, null, 5, {}, '', '../x', 'a/b', 'a?b=1', 'alert:', T.t3 + 'zz', 'ffffffffffffffff']) {
-    await assert.rejects(b.feed.open(bad), /^Error: gmail: /, `open ${String(bad)}`)
-    await assert.rejects(b.feed.markRead(bad), /^Error: gmail: /, `markRead ${String(bad)}`)
-  }
-  assert.equal(b.gmail.calls.length, calls)
-  assert.deepEqual(b.gmail.state.modifies, [])
+test('act: a Gmail refusal comes back as { ok: false, message } and the item stays unread', async () => {
+  const b = await signedIn({ gmail: { fail: { [`modify:${T.t1}`]: 500 } } })
+  const r = await b.feed.act(T.t1, 'markRead')
+  assert.equal(r.ok, false)
+  assert.ok(r.message.length > 0 && r.message.length <= 300)
+  assert.equal((await b.feed.snapshot()).items.find((i) => i.id === T.t1).read, false)
   await b.h.stop()
 })
 
-test('open: the thread opens the way a row click does (the plugin\'s reader page with no reviewer)', async () => {
+test('act open: the thread opens the way a row click does (the plugin\'s reader page with no reviewer)', async () => {
   const b = await signedIn()
-  await b.feed.open(T.t2)
+  assert.deepEqual(await b.feed.act(T.t2, 'open'), { ok: true })
   assert.ok(b.gmail.calls.some((c) => c.path.endsWith(`/threads/${T.t2}`) && /format=full/.test(c.url)), 'the thread was read in full')
+  await b.h.writesIdle()
+  assert.deepEqual(b.gmail.state.modifies, [], 'opening marks nothing read')
   await b.h.stop()
 })
 
-test('changed is emitted after each poll', async () => {
+test('sync: after activate\'s first cached view (signed out here), carrying the state', async () => {
+  const b = boot()
+  await b.h.ready
+  await until(() => lastOf(b, 'sync').length)
+  const s = lastOf(b, 'sync')[0]
+  assert.equal(s.name, 'inbox-feed')
+  assert.equal(s.data.state, 'signedOut')
+  assert.deepEqual(s.data.items, [])
+  await b.h.stop()
+})
+
+test('sync after a sign-in, then items after a poll: the new list is a sync once, then only diffs', async () => {
   const b = await signedIn()
-  const n = b.ctx.emitted.filter((e) => e.event === 'changed').length
-  assert.ok(n >= 1, 'the sign-in poll')
   await b.h.pollNow('test', true)
-  assert.ok(b.ctx.emitted.filter((e) => e.event === 'changed').length > n)
-  assert.ok(b.ctx.emitted.every((e) => e.name === 'inbox-feed' && e.event === 'changed' && Object.keys(e.data).length === 0))
+  const syncs = lastOf(b, 'sync')
+  assert.ok(syncs.length >= 2, 'start and the sign-in')
+  assert.equal(syncs[0].data.state, 'signedOut')
+  assert.equal(syncs[syncs.length - 1].data.state, 'ok')
+  assert.ok(lastOf(b, 'item').some((e) => e.data.id === T.t1), 'the first poll\'s threads come as items')
+  const n = b.ctx.emitted.length
+  await b.h.pollNow('test', true)
+  await until(() => true)
+  await new Promise((r) => setTimeout(r, 30))
+  assert.equal(b.ctx.emitted.length, n, 'a no-op poll emits nothing')
+  await b.h.stop()
+})
+
+test('a mark emits an item with the new read state; a thread leaving the scope is gone', async () => {
+  const b = await signedIn()
+  await new Promise((r) => setTimeout(r, 30))
+  const before = b.ctx.emitted.length
+  await b.feed.act(T.t1, 'markRead')
+  await b.h.writesIdle()
+  await new Promise((r) => setTimeout(r, 30))
+  const evs = b.ctx.emitted.slice(before)
+  const item = evs.find((e) => e.event === 'item' && e.data.id === T.t1)
+  assert.ok(item, 'item event')
+  assert.equal(item.data.read, true)
+  // an alert thread marked read leaves the Alerts lane: gone
+  await b.feed.act(T.a3, 'markRead')
+  await b.h.writesIdle()
+  await new Promise((r) => setTimeout(r, 30))
+  const gone = lastOf(b, 'gone')
+  assert.ok(gone.some((e) => e.data.ids.includes(T.a3)))
+  assert.ok(events(b).every((e) => ['item', 'gone', 'sync'].includes(e.event)), 'no changed event any more')
+  await b.h.stop()
+})
+
+test('an error is a sync with state error, its recovery a sync with ok', async () => {
+  const b = await signedIn()
+  await new Promise((r) => setTimeout(r, 30))
+  const n = lastOf(b, 'sync').length
+  b.h.S.error = 'boom'
+  await b.feed.act(T.t1, 'markRead')
+  await b.h.writesIdle()
+  await new Promise((r) => setTimeout(r, 30))
+  const err = lastOf(b, 'sync')[n]
+  assert.equal(err.data.state, 'error')
+  assert.equal(err.data.message, 'boom')
+  assert.ok(err.data.items.length > 0, 'the last known list comes with it')
+  await b.h.pollNow('test', true)
+  await new Promise((r) => setTimeout(r, 30))
+  const syncs = lastOf(b, 'sync')
+  assert.equal(syncs[syncs.length - 1].data.state, 'ok')
   await b.h.stop()
 })
 
 test('an app before 0.9.7 (services has no useAll, emit may be missing): still activates and provides; a throwing emit is harmless', async () => {
   const ctx = fakeCtx({ project: {}, triage: fakeTriage() })
   assert.equal(ctx.services.useAll, undefined)
+  assert.equal(ctx.slots, undefined)
+  assert.equal(ctx.overlay.buttons, undefined)
   const exportsHost = require('../dist/host')
   exportsHost.activate(ctx)
   assert.ok(ctx.provided['inbox-feed'], 'provides without useAll')
-  assert.deepEqual(await ctx.provided['inbox-feed'].describe(), { label: 'Mail', badge: 'MAIL', color: 'red', kind: 'mail' })
-  assert.equal((await ctx.provided['inbox-feed'].items({})).state, 'signedOut')
+  assert.equal((await ctx.provided['inbox-feed'].describe()).label, 'Mail')
+  assert.equal((await ctx.provided['inbox-feed'].snapshot()).state, 'signedOut')
   await exportsHost.deactivate()
   const ctx2 = fakeCtx({ project: {}, triage: fakeTriage() })
   ctx2.services.emit = () => {
@@ -438,4 +403,10 @@ test('an app before 0.9.7 (services has no useAll, emit may be missing): still a
   await h.ready
   await h.pollNow('x')
   await h.stop()
+  const ctx3 = fakeCtx({ project: {}, triage: fakeTriage() })
+  delete ctx3.services.emit
+  const h3 = host._start(ctx3, { setInterval: () => 0, clearInterval: () => {}, setTimeout: () => 0, clearTimeout: () => {} })
+  await h3.ready
+  await h3.pollNow('x')
+  await h3.stop()
 })
