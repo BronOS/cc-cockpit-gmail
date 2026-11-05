@@ -276,7 +276,8 @@ thread that left the scope) and sends the whole list when it starts, after a sig
 error is over. Inbox can open a thread (the same as a click on its row) and mark it read or
 unread (the same write as Mark read). The panel's footer shows the scope line Inbox sees. Nothing
 leaves your machine: the data goes to another plugin of the same project. Inbox 0.2.0 reads v2; an
-older Inbox (v1) no longer gets Mail from this version.
+older Inbox (v1) no longer gets Mail from this version. Providing needs no newer app; Inbox 0.2.0 itself
+needs cc-cockpit 0.10.0, and the toolbar buttons below need an app with `ctx.overlay.buttons` (0.10).
 
 **Thread overlays.** A thread opens with the overlay type `inbox-item { source: "bronos.gmail", id }`
 (the reviewer gets it in `prepare` and `annotate`; our own reader page starts at once with
