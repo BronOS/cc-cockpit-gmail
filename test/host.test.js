@@ -553,7 +553,8 @@ test('Open with a reviewer that has prepare: the overlay is up before the thread
   await ctx.sendPanel({ type: 'open', id: T.t1 })
   assert.deepEqual(order[0], ['reads at prepare', 0])
   // The row's subject (its newest mail's): the thread is not read yet.
-  assert.deepEqual(order[1], ['prepare', { key: `gmail:${T.t1}`, title: 'Re: Q4 budget' }])
+  // The inbox-item type goes with prepare: the reviewer fixes it when the overlay starts.
+  assert.deepEqual(order[1], ['prepare', { key: `gmail:${T.t1}`, title: 'Re: Q4 budget', type: { name: 'inbox-item', data: { source: 'bronos.gmail', id: T.t1 } } }])
   assert.ok(reads() > before, 'the open read the thread, after prepare')
   assert.deepEqual(order[2], ['annotate', `gmail:${T.t1}`])
   // The finally's cancel (a no-op once filled).
@@ -564,6 +565,7 @@ test('Open with a reviewer that has prepare: the overlay is up before the thread
   const prepared = order.find((x) => x[0] === 'prepare')[1]
   assert.match(prepared.key, /^gmail:alert:[a-f0-9]{16}$/)
   assert.match(prepared.title, /^HighCPU: node1/)
+  assert.equal(prepared.type, undefined, 'an alert group is no feed item: no type')
   assert.equal(order.find((x) => x[0] === 'annotate')[1], prepared.key)
   await h.stop()
 })
@@ -797,5 +799,19 @@ test('overlay buttons: a ctx without the member still activates and opens a thre
   assert.equal(ctx.buttonProviders.length, 0)
   await ctx.sendPanel({ type: 'open', id: T.t1 })
   assert.equal(ctx.overlays.length, 1)
+  await h.stop()
+})
+
+test('overlay buttons: a failed Mark read (a Gmail error) shows in the notice and throws, not silent', async () => {
+  const { ctx, h } = await signedIn({ gmail: { fail: { [`modify:${T.t1}`]: 500 } } })
+  const provider = ctx.buttonProviders[0].provider
+  const info = { type: { name: 'inbox-item', data: { source: 'bronos.gmail', id: T.t1 } }, title: 't', opener: 'bronos.gmail' }
+  const [button] = await provider(info)
+  assert.equal(button.id, 'markRead')
+  await assert.rejects(button.run(info), /^Error: gmail: /)
+  assert.equal(ctx.lastState().notice.kind, 'error')
+  assert.match(ctx.lastState().notice.text, /^gmail: /)
+  // Still unread, so the button still offers Mark read.
+  assert.equal((await provider(info))[0].id, 'markRead')
   await h.stop()
 })

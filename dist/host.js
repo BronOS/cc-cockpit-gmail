@@ -743,18 +743,33 @@ function start(ctx, io = {}) {
     return which && which.thread ? { name: 'inbox-item', data: { source: ctx.pluginId, id: which.thread } } : null
   }
 
-  /** The feed item an `inbox-item` overlay of ours names, or null (the data came from the opener: check it). */
+  /**
+   * The feed item an `inbox-item` overlay of ours names, or null (the data came from the opener: check it).
+   * Only a thread still in the feed counts: one that left it (out of every lane, e.g. read and older than readDays) is no
+   * item Inbox shows, so its overlay gets no buttons, as `act` refuses it.
+   */
   function ownItem(info) {
     const d = info && info.type && info.type.data
     if (!d || typeof d !== 'object' || d.source !== ctx.pluginId || typeof d.id !== 'string') return null
     return feedList(Infinity).find((i) => i.id === d.id) || null
   }
 
-  /** The item's actions but open, with `run` = the same code as the feed's `act`; labels follow the item's state. */
+  /**
+   * The item's actions but open, with `run` = the same code as the feed's `act`; labels follow the item's state.
+   * A refused act (a Gmail error) goes to the panel's notice and is thrown: the app only logs a run
+   * that throws, and an answer it does not read would make a failed Mark read silent.
+   */
   function overlayButtons(info) {
     const item = ownItem(info)
     if (!item) return []
-    return item.actions.filter((a) => a.id !== 'open').map((a) => ({ id: a.id, label: a.label, run: async () => void (await feedAct(item.id, a.id)) }))
+    const run = async (action) => {
+      const r = await feedAct(item.id, action)
+      if (r && r.ok === false) {
+        setNotice(r.message, 'error')
+        throw new Error(r.message)
+      }
+    }
+    return item.actions.filter((a) => a.id !== 'open').map((a) => ({ id: a.id, label: a.label, run: () => run(a.id) }))
   }
 
   /** What Discuss with Claude sends for a thread overlay: subject, sender and snippet, capped. */
@@ -793,7 +808,10 @@ function start(ctx, io = {}) {
     const v = viewKeyOf(id)
     if (!v) return null
     try {
-      await within(reviewer.prepare({ key: v.key, title: cut(oneLine(v.title), 200) || '(no subject)' }), FEATURES_WAIT_MS)
+      // The type goes with prepare: the reviewer fixes an overlay's type when it starts, so the
+      // annotate that fills a prepared overlay cannot add it later (an older reviewer ignores it).
+      const type = overlayType(id)
+      await within(reviewer.prepare({ key: v.key, title: cut(oneLine(v.title), 200) || '(no subject)', ...(type ? { type } : {}) }), FEATURES_WAIT_MS)
       return { key: v.key }
     } catch {
       return null

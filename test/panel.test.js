@@ -1,9 +1,10 @@
 'use strict'
-// The panel's row logic, the title bar, the setup guide and the CLI text, with no host.
+// The panel's row logic, the title bar, the setup guide, the CLI text and the reader page's ready, with no host.
 const test = require('node:test')
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const path = require('node:path')
+const vm = require('node:vm')
 const { rowKeyAction, rowClickOpens, rowButtons, moveIndex, ageText, alertBadge } = require('../panels/rowlogic')
 const { headerSpec, META_MAX } = require('../dist/lib/header')
 const { LINKS, STEPS, linkUrl } = require('../dist/lib/setup')
@@ -224,4 +225,43 @@ test('statusText: every state reads as a next step', () => {
   assert.match(ready, /problem {3}alertSenders: bad/)
   assert.match(statusText({ client: { source: 'pasted', id: 'x' }, signedIn: false, signingIn: true }), /waiting for the browser/)
   assert.match(listText({ lanes: [] }, undefined), /\* unread {3}triage: U urgent/)
+})
+
+/**
+ * panels/thread.js in a vm with just enough of a page: the elements it looks up, a template whose
+ * parsed content has no elements (clean() then has nothing to strip), and a ccPanel that records.
+ */
+function threadPage() {
+  const el = () => ({ listeners: [], children: null, addEventListener(t, fn) { this.listeners.push(fn) }, replaceChildren(c) { this.children = c } })
+  const els = { doc: el(), discuss: el(), new: el(), browser: el() }
+  const page = { readies: 0, posts: [], onMessage: null, els }
+  const document = {
+    title: '',
+    getElementById: (id) => els[id],
+    querySelectorAll: () => [],
+    createElement: () => ({ set innerHTML(v) { this.content = { html: v, querySelectorAll: () => [] } } }),
+    createTextNode: (t) => t,
+  }
+  const ccPanel = { ready: () => page.readies++, post: (m) => page.posts.push(m), onMessage: (fn) => (page.onMessage = fn) }
+  const code = fs.readFileSync(path.join(__dirname, '..', 'panels', 'thread.js'), 'utf8')
+  vm.runInNewContext(code, { document, ccPanel, Map, Set, Number, String, Array })
+  page.send = (m) => page.onMessage(m)
+  return page
+}
+
+test('thread page: ready once the mail is drawn (not at load), once; a mail with no html parts is ready on doc', () => {
+  const p = threadPage()
+  assert.equal(p.readies, 0, 'the loader stays while the page waits for the mail')
+  p.send({ type: 'doc', title: 'Lunch', parts: 2 })
+  p.send({ type: 'html', i: 0, part: '<p>Hi ' })
+  assert.equal(p.readies, 0, 'not before every part is in')
+  p.send({ type: 'html', i: 1, part: 'there</p>' })
+  assert.equal(p.readies, 1)
+  assert.equal(p.els.doc.children.html, '<p>Hi there</p>')
+  // A part sent again re-renders but does not call ready a second time.
+  p.send({ type: 'html', i: 1, part: 'again</p>' })
+  assert.equal(p.readies, 1)
+  const empty = threadPage()
+  empty.send({ type: 'doc', title: 'Empty', parts: 0 })
+  assert.equal(empty.readies, 1)
 })

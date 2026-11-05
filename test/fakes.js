@@ -324,7 +324,7 @@ function fakeCtx(opts = {}) {
       for (const fn of actionListeners) await fn(id)
     },
     overlay: {
-            start(spec) {
+      start(spec) {
         const o = { spec, posts: [], listeners: [], answer: opts.overlayAnswer || { kind: 'dismissed' } }
         ctx.overlays.push(o)
         const result = Promise.resolve(o.answer)
