@@ -640,8 +640,10 @@ function start(ctx, io = {}) {
     try {
       S.labels = await gmail.labels(abort.signal)
     } catch (e) {
+      // Not stored: a failure is retried on the next call (a poll or a thread view) instead of
+      // leaving user label names out until restart.
       ctx.log.warn(`reading the label names failed: ${e.message}`)
-      S.labels = {}
+      return {}
     }
     return S.labels
   }
@@ -1261,7 +1263,7 @@ function start(ctx, io = {}) {
 
   // ---- the inbox-feed service (v2, lib/feed.js; Inbox reads it, cc-cockpit 0.9.7+) ----
 
-  const feed = { sent: new Map(), state: null, started: false } // what Inbox was last told: id -> item, and the Sync state
+  const feed = { sent: new Map(), state: null, stateKey: '', started: false } // what Inbox was last told: id -> item, and the Sync state (kind + message)
 
   /** The rows, the threads of their alert groups and the context the feed answers from. */
   function feedRows() {
@@ -1299,6 +1301,7 @@ function start(ctx, io = {}) {
     const st = feedState()
     feed.sent = new Map(items.map((i) => [i.id, i]))
     feed.state = st.state
+    feed.stateKey = `${st.state}|${st.message || ''}`
     return { items, ...st, asOf: (S.cache && S.cache.lastPoll) || now() }
   }
 
@@ -1320,7 +1323,8 @@ function start(ctx, io = {}) {
     if (S.stopped || !feed.started || !ctx.services || typeof ctx.services.emit !== 'function') return
     try {
       const st = feedState()
-      if (st.state !== feed.state) return feedEmit('sync', feedSync())
+      // The message counts too: error A -> error B or a new signed-out reason would otherwise stay stale in Inbox.
+      if (`${st.state}|${st.message || ''}` !== feed.stateKey) return feedEmit('sync', feedSync())
       const next = feedList()
       const d = F.diffFeed(feed.sent, next)
       feed.sent = new Map(next.map((i) => [i.id, i]))

@@ -31,7 +31,8 @@ const PLACE = Object.freeze({ kind: 'folder', name: 'Inbox' })
 function scopeLine(cfg) {
   const lanes = (cfg && cfg.lanes) || {}
   const parts = []
-  if (lanes.unread !== false || (lanes.alerts !== false && cfg && cfg.alertSenders && cfg.alertSenders.length)) parts.push(`unread of the last ${cfg.unreadDays} days`)
+  if (lanes.unread !== false) parts.push(`unread of the last ${cfg.unreadDays} days`)
+  else if (lanes.alerts !== false && cfg && cfg.alertSenders && cfg.alertSenders.length) parts.push('unread alerts')
   if (lanes.read !== false) parts.push(`read of the last ${cfg.readDays} days`)
   return cut(parts.length ? parts.join(' + ') : 'nothing (every lane is off)', CUTS.scope)
 }
