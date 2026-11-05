@@ -200,9 +200,13 @@ function start(ctx, io = {}) {
 
   // ---- the view ----
 
+  /** The cache with the pending marks laid over it (what the panel and the feed show before the calls land). */
+  function markedCache() {
+    return overlayCache(S.cache, new Map([...S.marks].map(([id, m]) => [id, m.unread])))
+  }
+
   function rebuild() {
-    const marks = new Map([...S.marks].map(([id, m]) => [id, m.unread]))
-    S.view = S.cache && signedIn() ? buildView({ cfg: cfg(), cache: overlayCache(S.cache, marks), verdicts: triageOn() ? S.verdicts : {} }) : { lanes: [], unread: 0 }
+    S.view = S.cache && signedIn() ? buildView({ cfg: cfg(), cache: markedCache(), verdicts: triageOn() ? S.verdicts : {} }) : { lanes: [], unread: 0 }
     try {
       ctx.badge(PANEL, S.view.unread || null)
     } catch (e) {
@@ -361,7 +365,7 @@ function start(ctx, io = {}) {
       } finally {
         S.polling = null
         postState()
-        emitChanged()
+        emitWithLabels()
       }
     })()
     postState()
@@ -454,7 +458,7 @@ function start(ctx, io = {}) {
       await saveTriage()
       rebuild()
       postState()
-      emitChanged()
+      emitWithLabels()
     })
     return S.classifying
   }
@@ -515,7 +519,7 @@ function start(ctx, io = {}) {
           S.scopePromptHidden = false
           rebuild()
         } else resetAccount()
-        emitChanged() // Inbox hears the sign-in at once (a sync), not with the first poll
+        emitWithLabels() // Inbox hears the sign-in at once (a sync), not with the first poll
         const again = same && !r.sessionOnly ? `Signed in again as ${before}${auth.status().needsWriteScope ? '.' : ': Mark read and Mark unread work now.'}` : null
         setNotice(r.sessionOnly ? `Signed in, but only until the app closes: ${r.sessionOnly}. Fix the keychain (ccc guide settings-secrets) and sign in again to stay signed in.` : again || 'Signed in with Google. Reading your mail…', r.sessionOnly ? 'error' : 'info')
         ctx.log.info(`signed in (${from})`)
@@ -716,6 +720,13 @@ function start(ctx, io = {}) {
     postState()
   }
 
+  /** Close an overlay handle that is not needed; a throw here must not mask the error of the `finally` it runs in. */
+  function closeQuietly(handle) {
+    try {
+      handle.close()
+    } catch {}
+  }
+
   /**
    * Open: the thread as clean HTML with its pictures in the reviewer, else as plain text in the
    * reviewer (a reviewer whose annotate takes text only), else in our own page. The chain, each
@@ -752,7 +763,7 @@ function start(ctx, io = {}) {
       await showThread(id, pre, early, shown)
     } finally {
       if (pre) await cancelView(pre)
-      if (early && !early.used) early.handle.close()
+      if (early && !early.used) closeQuietly(early.handle)
     }
   }
 
@@ -796,7 +807,7 @@ function start(ctx, io = {}) {
 
   /** What Discuss with Claude sends for a thread overlay: subject, sender and snippet, capped. */
   function overlayDiscuss(id) {
-    const item = feedList(Infinity).find((i) => i.id === id)
+    const item = feedItemOf(id)
     if (!item) return null
     const from = item.from ? [item.from.name, item.from.address].filter(Boolean).join(' ') : ''
     return { text: cut([`Subject: ${item.title}`, from ? `From: ${from}` : '', item.preview || ''].filter(Boolean).join('\n'), 4000) }
@@ -943,11 +954,6 @@ function start(ctx, io = {}) {
   }
 
   /**
-   * Without the reviewer's annotate: our own read-only page with Discuss, New session and ↗. It
-   * gets the same HTML in parts, then one message per image, so no message passes the page limit.
-   * A link click in the page comes back as `{ open }`.
-   */
-  /**
    * Starts the reader page's overlay (before the thread is read when it can); null when start throws.
    * `refusal` resolves null once the page is up (OVERLAY_SETTLE_MS without a rejection, or the person
    * closed it), else main's refusal; `ended` turns true once the overlay ended.
@@ -967,6 +973,11 @@ function start(ctx, io = {}) {
     }
   }
 
+  /**
+   * Without the reviewer's annotate: our own read-only page with Discuss, New session and ↗. It
+   * gets the same HTML in parts, then one message per image, so no message passes the page limit.
+   * A link click in the page comes back as `{ open }`.
+   */
   async function plainReader(id, t, v, early, shown = () => {}, seen = shown) {
     const started = early || startReader(id, t.title)
     if (!started) return
@@ -1120,7 +1131,7 @@ function start(ctx, io = {}) {
         }
         rebuild()
         postState()
-        emitChanged()
+        emitWithLabels()
         const results = await Promise.all(
           ids.map((id) => {
             const call = (perThread.get(id) || Promise.resolve())
@@ -1168,7 +1179,7 @@ function start(ctx, io = {}) {
         if (failed.length) {
           rebuild()
           postState()
-          emitChanged() // the rolled-back rows are unread again
+          emitWithLabels() // the rolled-back rows are unread again
         }
         return { ok: !failed.length, done: ids.length - failed.length, failed, ...(scope ? { scope } : {}) }
       } catch (e) {
@@ -1384,7 +1395,7 @@ function start(ctx, io = {}) {
 
   // ---- the inbox-feed service (v2, lib/feed.js; Inbox reads it, cc-cockpit 0.9.7+) ----
 
-  const feed = { sent: new Map(), state: null, stateKey: '', started: false } // what Inbox was last told: id -> item, and the Sync state (kind + message)
+  const told = { sent: new Map(), stateKey: '', started: false } // what Inbox was last told: id -> item, and the Sync state (kind + message)
 
   /** The rows, the threads of their alert groups and the context the feed answers from. */
   function feedRows() {
@@ -1393,13 +1404,12 @@ function start(ctx, io = {}) {
     // showing the last items" as the contract asks.
     if (signedIn()) return { rows: allRows(S.view), threads: S.cache ? overlayThreads() : {} }
     if (!S.cache || !S.cache.lists) return { rows: [], threads: {} }
-    const marks = new Map([...S.marks].map(([id, m]) => [id, m.unread]))
-    const cache = overlayCache(S.cache, marks)
+    const cache = markedCache()
     return { rows: allRows(buildView({ cfg: cfg(), cache, verdicts: {} })), threads: cache.threads }
   }
 
   function overlayThreads() {
-    return overlayCache(S.cache, new Map([...S.marks].map(([id, m]) => [id, m.unread]))).threads
+    return markedCache().threads
   }
 
   /** All items of the scope (`limit`: the contract's 1000 by default; `only`: just that id). */
@@ -1428,9 +1438,8 @@ function start(ctx, io = {}) {
   function feedSync() {
     const items = feedList()
     const st = feedState()
-    feed.sent = new Map(items.map((i) => [i.id, i]))
-    feed.state = st.state
-    feed.stateKey = `${st.state}|${st.message || ''}`
+    told.sent = new Map(items.map((i) => [i.id, i]))
+    told.stateKey = `${st.state}|${st.message || ''}`
     return { items, ...st, asOf: (S.cache && S.cache.lastPoll) || now() }
   }
 
@@ -1449,14 +1458,14 @@ function start(ctx, io = {}) {
    * the first sync (activate's cached view). Never throws: an older app has no listener to reach.
    */
   function emitFeed() {
-    if (S.stopped || !feed.started || !ctx.services || typeof ctx.services.emit !== 'function') return
+    if (S.stopped || !told.started || !ctx.services || typeof ctx.services.emit !== 'function') return
     try {
       const st = feedState()
       // The message counts too: error A -> error B or a new signed-out reason would otherwise stay stale in Inbox.
-      if (`${st.state}|${st.message || ''}` !== feed.stateKey) return feedEmit('sync', feedSync())
+      if (`${st.state}|${st.message || ''}` !== told.stateKey) return feedEmit('sync', feedSync())
       const next = feedList()
-      const d = F.diffFeed(feed.sent, next)
-      feed.sent = new Map(next.map((i) => [i.id, i]))
+      const d = F.diffFeed(told.sent, next)
+      told.sent = new Map(next.map((i) => [i.id, i]))
       for (const it of d.items) feedEmit('item', it)
       for (const ids of F.goneChunks(d.gone)) feedEmit('gone', { ids })
     } catch (e) {
@@ -1472,15 +1481,15 @@ function start(ctx, io = {}) {
     await labelNames([{ labelIds: [...ids] }])
   }
 
-  /** What a poll ends with: the label names, then the changes. */
-  function emitChanged() {
+  /** What a poll, a mark or a sign-in ends with: the label names, then the changes (emitFeed). */
+  function emitWithLabels() {
     if (S.stopped) return
     void feedLabelNames().then(emitFeed, emitFeed)
   }
 
   void ready.then(() => {
     if (S.stopped || !ctx.services || typeof ctx.services.emit !== 'function') return
-    feed.started = true
+    told.started = true
     feedEmit('sync', feedSync())
   })
 
