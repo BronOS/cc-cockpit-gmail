@@ -60,6 +60,8 @@ function readSettings(p) {
     triageText: s.triageText === 'summary' ? 'summary' : 'full',
     // 0.3.0: opening a thread from the panel marks it read in Gmail, as Gmail does; off keeps it unread.
     markReadOnOpen: typeof s.markReadOnOpen === 'boolean' ? s.markReadOnOpen : false,
+    // The inbox-feed sends an alert group as one item (the panel's row); off, one per thread.
+    alertGroupsInInbox: typeof s.alertGroupsInInbox === 'boolean' ? s.alertGroupsInInbox : true,
   }
   return { cfg, problems }
 }

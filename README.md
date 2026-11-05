@@ -132,6 +132,7 @@ Settings > This project > Gmail, or from a tab: `ccc plugin config bronos.gmail 
 | `alertSenders` | `[]` | addresses whose mail goes to Alerts; empty: no Alerts lane |
 | `pollMinutes` | 2 | only while the project's window is open |
 | `triageText` | `full` | `full` or `summary` (see Privacy) |
+| `alertGroupsInInbox` | `true` | "Alerts in the Inbox: one item per alert group": the Inbox plugin gets an alert group as one item, as the Alerts lane shows it; off: one item per alert thread |
 | `markReadOnOpen` | `false` | on: opening a thread from the panel marks it read in Gmail (an alert row: the threads it shows); off (the default since 0.4.0): it stays unread until you press Mark read |
 
 ```sh
@@ -265,10 +266,17 @@ talks to Jira itself, and nothing needs setting up in the Gmail plugin.
 Since 0.5.0 the plugin provides the `inbox-feed` service (v2) for the Inbox plugin, which merges
 Chat, Mail, Jira and more into one list and applies its own rules. The feed is the plugin's scope:
 the **unread and read threads of the last days** (the Unread lane's days, the Read lane's days
-and cap; the lanes you switched off are not in it) and the **alert threads**, each its own item
-(an alert group is a panel idea). Each item carries what rules can use: subject, a preview, the
+and cap; the lanes you switched off are not in it) and the **alerts**. An alert group is one item,
+as the Alerts lane shows it (setting `alertGroupsInInbox`, on by default): id `alert:<name>` (a name
+too long for the contract's 200 characters is cut and hashed), the row's title, the newest alert
+message as its time, sender and `rev` (so a new firing brings back an item you marked Done in
+Inbox), labels `alert`, `alert:<name>`, `firing` or `resolved`, `count:<n>` (unread alert messages)
+and `firing:<n>`, and the actions open (all its threads on one page) and mark read (all of them).
+It is gone once none of its threads is unread. With the setting off each thread of a group is its
+own item labelled `alert` and `alert:<name>`; switching it sends the whole list again. A thread from
+an alert sender that is no Grafana alert is always its own item. Each thread item carries what rules can use: subject, a preview, the
 lead sender, whether you are in To or Cc, read or unread, the Inbox folder, labels (your Gmail
-label names, `important`, `starred`, `category:updates`, `alert`, `alert:<name>`, `jira:ABC-12`)
+label names, `important`, `starred`, `category:updates`, `alert`, `jira:ABC-12`)
 and the actions open, mark read / mark unread. The triage verdicts of the panel stay in the panel.
 It is built from the threads the panel already holds, never with a Gmail call. The plugin tells
 Inbox what changed after each poll and each mark (an `item` per changed thread, `gone` for a
@@ -279,7 +287,7 @@ leaves your machine: the data goes to another plugin of the same project. Inbox 
 older Inbox (v1) no longer gets Mail from this version. Providing needs no newer app; Inbox 0.2.0 itself
 needs cc-cockpit 0.10.0, and the toolbar buttons below need an app with `ctx.overlay.buttons` (0.10).
 
-**Thread overlays.** A thread opens with the overlay type `inbox-item { source: "bronos.gmail", id }`
+**Thread overlays.** A thread (and, with `alertGroupsInInbox` on, an alert group) opens with the overlay type `inbox-item { source: "bronos.gmail", id }`
 (the reviewer gets it in `prepare` and `annotate`; our own reader page starts at once with
 `ready: 'manual'`, before the thread is read, and drops its loader once the mail is drawn). On an app
 that has `ctx.overlay.buttons`, the overlay of one of this plugin's own threads gets Mark read / Mark

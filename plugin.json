@@ -102,6 +102,12 @@
             "maximum": 1440,
             "default": 2
           },
+          "alertGroupsInInbox": {
+            "type": "boolean",
+            "title": "Alerts in the Inbox: one item per alert group",
+            "description": "The Inbox plugin gets an alert group as one item, as the Alerts lane shows it (Mark read marks all its threads read; a new alert brings it back). Off: one item per alert thread.",
+            "default": true
+          },
           "markReadOnOpen": {
             "type": "boolean",
             "title": "Opening a thread marks it read",

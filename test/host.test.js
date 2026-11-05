@@ -565,7 +565,7 @@ test('Open with a reviewer that has prepare: the overlay is up before the thread
   const prepared = order.find((x) => x[0] === 'prepare')[1]
   assert.match(prepared.key, /^gmail:alert:[a-f0-9]{16}$/)
   assert.match(prepared.title, /^HighCPU: node1/)
-  assert.equal(prepared.type, undefined, 'an alert group is no feed item: no type')
+  assert.deepEqual(prepared.type, { name: 'inbox-item', data: { source: 'bronos.gmail', id: 'alert:HighCPU' } }, 'an alert group is a feed item (alertGroupsInInbox, on by default)')
   assert.equal(order.find((x) => x[0] === 'annotate')[1], prepared.key)
   await h.stop()
 })
@@ -763,13 +763,19 @@ test('thread overlays: the reader page starts at once with the inbox-item type a
   await h.stop()
 })
 
-test('thread overlays: the reviewer gets the type in annotate; an alert row has none', async () => {
+test('thread overlays: the reviewer gets the type in annotate; an alert row has the group\'s, none with alert groups off', async () => {
   const calls = []
   const { ctx, h } = await signedIn({ reviewer: { annotate: async (s) => (calls.push(s), { opened: true }) } })
   await ctx.sendPanel({ type: 'open', id: T.t1 })
   assert.deepEqual(calls[0].type, { name: 'inbox-item', data: { source: 'bronos.gmail', id: T.t1 } })
   await ctx.sendPanel({ type: 'open', id: 'alert:HighCPU' })
-  assert.equal(calls[1].type, undefined)
+  assert.deepEqual(calls[1].type, { name: 'inbox-item', data: { source: 'bronos.gmail', id: 'alert:HighCPU' } })
+  // The group's overlay gets its item buttons (Mark read: all its threads) like a thread's.
+  const buttons = await ctx.buttonProviders[0].provider({ type: calls[1].type, title: 't', opener: 'bronos.gmail' })
+  assert.deepEqual(buttons.map((b) => b.id), ['markRead'])
+  await ctx.changeSettings({ alertSenders: ['alerts@example.com'], alertGroupsInInbox: false })
+  await ctx.sendPanel({ type: 'open', id: 'alert:HighCPU' })
+  assert.equal(calls[calls.length - 1].type, undefined, 'off: an alert row shows several threads and is no feed item')
   await h.stop()
 })
 

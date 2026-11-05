@@ -1,8 +1,8 @@
 'use strict'
-// The `inbox-feed` service (v2, 0.5.0): the pure mapping (fields, labels, caps, alert threads, the
+// The `inbox-feed` service (v2, 0.5.0): the pure mapping (fields, labels, caps, alert threads and groups, the
 // diff), the host's snapshot from its cache in each state, act with a foreign id or an action the
 // item lacks, the item / gone / sync events after a poll, a mark, a sign-in and an error, and an app
-// without `useAll`, `slots` or `overlay.buttons` (an older app).
+// without `useAll`, `slots` or `overlay.buttons` (an older app); alert groups as one item each (alertGroupsInInbox).
 const test = require('node:test')
 const assert = require('node:assert/strict')
 const host = require('../dist/host')
@@ -83,6 +83,60 @@ test('feedItems: threads of every lane, an alert group as one item per thread, n
   const noThread = F.feedItems([rows[2]], { me: ME, threads: {} })
   assert.deepEqual(noThread, [])
   assert.equal(F.feedItems(Array.from({ length: 1200 }, (_, k) => threadRow(`t${k}`, { latest: { at: k + 1 } })), { me: ME }).length, 1000)
+})
+
+const groupOf = (o = {}) => ({ id: 'alert:HighCPU', name: 'HighCPU', nodes: ['node1', 'node2'], count: 3, firing: 2, resolved: false, at: 100, threadIds: ['a1', 'a2'], latest: msgOf({ id: 'g-newest', address: 'alerts@example.com', from: 'Grafana', subject: '[FIRING:1] HighCPU', snippet: 'Firing  now', at: 100 }), ...o })
+
+test('groupItem: the panel\'s row as one item: title, newest alert as rev and from, unread, open and markRead only, the badge facts as labels', () => {
+  const it = F.groupItem(groupOf())
+  assert.deepEqual(it, {
+    id: 'alert:HighCPU',
+    rev: 'g-newest',
+    title: 'HighCPU: node1, node2',
+    time: 100,
+    read: false,
+    place: { kind: 'folder', name: 'Inbox' },
+    actions: [{ id: 'open', label: 'Open' }, { id: 'markRead', label: 'Mark read' }],
+    preview: 'Firing now',
+    from: { name: 'Grafana', address: 'alerts@example.com' },
+    labels: ['alert', 'alert:HighCPU', 'firing', 'count:3', 'firing:2'],
+  })
+  assert.deepEqual(it, structuredClone(it))
+  assert.deepEqual(F.groupItem(groupOf({ resolved: true, firing: 0, count: 1 })).labels, ['alert', 'alert:HighCPU', 'resolved', 'count:1', 'firing:0'])
+  // A new firing is a new newest message: the rev changes, which brings back an item Inbox marked Done.
+  assert.notEqual(F.groupItem(groupOf({ latest: msgOf({ id: 'g-later', at: 200 }), at: 200 })).rev, it.rev)
+  assert.equal(F.groupItem(groupOf({ latest: null })), null)
+})
+
+test('groupItemId: alert:<name> while it fits 200 characters, else the name cut with a hash of the whole name', () => {
+  assert.equal(F.groupItemId('HighCPU'), 'alert:HighCPU')
+  const fits = 'x'.repeat(194)
+  assert.equal(F.groupItemId(fits), `alert:${fits}`)
+  const a = F.groupItemId(`${'y'.repeat(199)}A`)
+  const b = F.groupItemId(`${'y'.repeat(199)}B`)
+  assert.equal(a.length, 200)
+  assert.match(a, /^alert:y+~[a-f0-9]{16}$/)
+  assert.notEqual(a, b, 'two long names stay two items')
+  const astral = F.groupItemId(`${'z'.repeat(176)}${'😀'.repeat(20)}`)
+  assert.ok(!/[\ud800-\udbff]~/.test(astral), 'no half character before the hash')
+  assert.equal(F.groupItem(groupOf({ name: 'q'.repeat(200) })).id.length, 200)
+})
+
+test('feedItems with groups: one item per alert group, plain alert threads and the rest stay per thread; only matches a group id', () => {
+  const group = groupOf({ at: 95 })
+  const rows = [
+    threadRow('old', { latest: { at: 1 } }),
+    { id: group.id, kind: 'alert', lane: 'alerts', at: 95, unread: true, group },
+    threadRow('plain-alert', { lane: 'alerts', latest: { at: 7 } }),
+  ]
+  const threads = { a1: thread('a1', { latest: { at: 100 } }), a2: thread('a2', { latest: { at: 90 } }) }
+  const out = F.feedItems(rows, { me: ME, threads, groups: true })
+  assert.deepEqual(out.map((i) => i.id), ['alert:HighCPU', 'plain-alert', 'old'])
+  assert.deepEqual(out[1].labels, ['alert'])
+  assert.deepEqual(F.feedItems(rows, { me: ME, threads, groups: true, only: 'alert:HighCPU' }), [out[0]])
+  assert.deepEqual(F.feedItems(rows, { me: ME, threads, groups: true, only: 'a1' }), [], 'a grouped thread is no item of its own')
+  // Off (groups absent or false): the 0.5.0 feed, one item per thread of the group.
+  assert.deepEqual(F.feedItems(rows, { me: ME, threads, groups: false }).map((i) => i.id), ['a1', 'a2', 'plain-alert', 'old'])
 })
 
 test('diffFeed: new and changed (each field) are items, missing ids are gone, a no-op is nothing', () => {
@@ -189,8 +243,8 @@ test('the plugin provides inbox-feed v2 with the contract\'s methods and describ
   await h.stop()
 })
 
-test('snapshot, signed in: the unread and read threads and the alert threads from the cache, no API call, plain data', async () => {
-  const { feed, gmail, h } = await signedIn()
+test('snapshot, signed in, alert groups off: the unread and read threads and the alert threads from the cache, no API call, plain data', async () => {
+  const { feed, gmail, h } = await signedIn({ project: { alertGroupsInInbox: false } })
   const calls = gmail.calls.length
   const r = await feed.snapshot()
   assert.equal(gmail.calls.length, calls, 'answered from the cache')
@@ -264,7 +318,7 @@ test('snapshot, signed out after having mail: the last cached items still come; 
 test('act refuses a foreign id, a bad argument and an action the item lacks; nothing reaches Gmail', async () => {
   const b = await signedIn()
   const calls = b.gmail.calls.length
-  for (const bad of [undefined, null, 5, {}, '', '../x', 'alert:HighCPU', 'ffffffffffffffff']) {
+  for (const bad of [undefined, null, 5, {}, '', '../x', 'alert:Nope', T.a1, 'ffffffffffffffff']) {
     const r = await b.feed.act(bad, 'markRead')
     assert.equal(r.ok, false, String(bad))
     assert.match(r.message, /^gmail: /)
@@ -294,8 +348,9 @@ test('act markRead: the existing write path (the UNREAD label), then the item is
   await b.h.stop()
 })
 
-test('act markRead on a thread of an alert group works (the thread is its own item)', async () => {
-  const b = await signedIn()
+test('alert groups off: act markRead on a thread of an alert group works (the thread is its own item), the group is no item', async () => {
+  const b = await signedIn({ project: { alertGroupsInInbox: false } })
+  assert.equal((await b.feed.act('alert:HighCPU', 'markRead')).ok, false)
   assert.deepEqual(await b.feed.act(T.a1, 'markRead'), { ok: true })
   await b.h.writesIdle()
   assert.deepEqual(b.gmail.state.modifies.map((m) => m.id), [T.a1])
@@ -555,4 +610,95 @@ test('an app before 0.9.7 (services has no useAll, emit may be missing): still a
   await h3.ready
   await h3.pollNow('x')
   await h3.stop()
+})
+
+// ---- alert groups in the feed (alertGroupsInInbox, on by default) ----
+
+test('snapshot, alert groups on (the default): one item per group as the panel shows it; a plain alert thread stays its own item', async () => {
+  const { feed, h } = await signedIn()
+  const r = await feed.snapshot()
+  const byId = Object.fromEntries(r.items.map((i) => [i.id, i]))
+  assert.ok(!byId[T.a1] && !byId[T.a2], 'the grouped threads are no items of their own')
+  assert.ok(byId[T.a3], 'a plain alert-sender thread is still an item')
+  const g = byId['alert:HighCPU']
+  assert.ok(g)
+  assert.match(g.title, /^HighCPU: node1/)
+  assert.equal(g.rev, '18f0a1b2c3d4e5b3', 'the newest alert message of the group')
+  assert.equal(g.read, false)
+  assert.equal(g.from.address, 'alerts@example.com')
+  assert.deepEqual(g.actions.map((a) => a.id), ['open', 'markRead'])
+  assert.ok(g.labels.includes('alert') && g.labels.includes('alert:HighCPU') && g.labels.includes('resolved') && g.labels.includes('count:3'))
+  await h.stop()
+})
+
+test('alert groups on: act markRead marks every thread of the group read, then the group is gone; markUnread is refused', async () => {
+  const b = await signedIn()
+  assert.equal((await b.feed.act('alert:HighCPU', 'markUnread')).ok, false)
+  await new Promise((r) => setTimeout(r, 30))
+  assert.deepEqual(await b.feed.act('alert:HighCPU', 'markRead'), { ok: true })
+  await b.h.writesIdle()
+  assert.deepEqual(b.gmail.state.modifies.map((m) => m.id).sort(), [T.a1, T.a2].sort())
+  await new Promise((r) => setTimeout(r, 30))
+  assert.ok(lastOf(b, 'gone').some((e) => e.data.ids.includes('alert:HighCPU')), 'no unread member left: gone')
+  assert.ok(!(await b.feed.snapshot()).items.some((i) => i.id === 'alert:HighCPU'))
+  await b.h.stop()
+})
+
+test('alert groups on: act open opens the group the way its row does (all its threads on one page)', async () => {
+  const b = await signedIn()
+  assert.deepEqual(await b.feed.act('alert:HighCPU', 'open'), { ok: true })
+  await until(() => b.gmail.calls.some((c) => c.path.endsWith(`/threads/${T.a1}`) && /format=full/.test(c.url)))
+  await until(() => b.gmail.calls.some((c) => c.path.endsWith(`/threads/${T.a2}`) && /format=full/.test(c.url)))
+  await until(() => b.ctx.overlays.some((o) => o.posts.some((m) => m.type === 'doc')))
+  const o = b.ctx.overlays[b.ctx.overlays.length - 1]
+  assert.deepEqual(o.spec.type, { name: 'inbox-item', data: { source: 'bronos.gmail', id: 'alert:HighCPU' } })
+  await b.h.writesIdle()
+  await b.h.stop()
+})
+
+test('alert groups on: a new firing changes the group\'s rev (an item event), so an item Inbox marked Done comes back', async () => {
+  const b = await signedIn()
+  await new Promise((r) => setTimeout(r, 30))
+  const before = (await b.feed.snapshot()).items.find((i) => i.id === 'alert:HighCPU')
+  const t = b.gmail.threads[T.a1]
+  const last = t.messages[t.messages.length - 1]
+  const fresh = structuredClone(last)
+  fresh.id = '18f0a1b2c3d4e5c9'
+  fresh.internalDate = String(NOW + 60000)
+  t.messages.push(fresh)
+  b.gmail.state.historyId = '1500'
+  t.historyId = '1500'
+  const n = b.ctx.emitted.length
+  await b.h.pollNow('test', true)
+  await new Promise((r) => setTimeout(r, 30))
+  const ev = b.ctx.emitted.slice(n).find((e) => e.event === 'item' && e.data.id === 'alert:HighCPU')
+  assert.ok(ev, 'the group comes as an item')
+  assert.equal(ev.data.rev, '18f0a1b2c3d4e5c9')
+  assert.notEqual(ev.data.rev, before.rev)
+  await b.h.stop()
+})
+
+test('alert groups: switching the setting is a sync with the other ids; off is the per-thread feed', async () => {
+  const b = await signedIn()
+  await new Promise((r) => setTimeout(r, 30))
+  const n = lastOf(b, 'sync').length
+  await b.ctx.changeSettings({ alertSenders: ['alerts@example.com'], alertGroupsInInbox: false })
+  const off = lastOf(b, 'sync')[n]
+  assert.ok(off, 'a sync, so Inbox drops the group id at once')
+  const offIds = off.data.items.map((i) => i.id)
+  assert.ok(offIds.includes(T.a1) && offIds.includes(T.a2) && !offIds.includes('alert:HighCPU'))
+  await b.h.S.polling
+  await new Promise((r) => setTimeout(r, 30))
+  const m = lastOf(b, 'sync').length
+  await b.ctx.changeSettings({ alertSenders: ['alerts@example.com'], alertGroupsInInbox: true })
+  const on = lastOf(b, 'sync')[m]
+  assert.ok(on.data.items.some((i) => i.id === 'alert:HighCPU') && !on.data.items.some((i) => i.id === T.a1))
+  await b.h.S.polling
+  // Another setting changed: no sync of its own.
+  await new Promise((r) => setTimeout(r, 30))
+  const k = lastOf(b, 'sync').length
+  await b.ctx.changeSettings({ alertSenders: ['alerts@example.com'], alertGroupsInInbox: true, rowsPerLane: 5 })
+  assert.equal(lastOf(b, 'sync').length, k)
+  await b.h.S.polling
+  await b.h.stop()
 })

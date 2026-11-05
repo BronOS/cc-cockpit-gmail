@@ -40,7 +40,7 @@ const { STEPS, linkUrl } = require('./lib/setup')
 const { runCli } = require('./lib/cli')
 const { jsonFile } = require('./lib/store')
 const F = require('./lib/feed')
-const { hashOf, sha, oneLine, cut, rowId, mapLimit, gmailId } = require('./lib/util')
+const { hashOf, sha, oneLine, cut, rowId, mapLimit, gmailId, ALERT } = require('./lib/util')
 const { esc } = require('./lib/entities')
 const J = require('./lib/jira')
 const { MAX_TOTAL_CHARS } = require('./lib/images')
@@ -480,6 +480,7 @@ function start(ctx, io = {}) {
   // ---- settings ----
 
   ctx.onSettingsChange(async () => {
+    const groupsBefore = cfg().alertGroupsInInbox
     S.settings = readSettings(ctx.settings.project)
     if (!auth) return postState()
     try {
@@ -491,6 +492,9 @@ function start(ctx, io = {}) {
     }
     reschedule()
     rebuild()
+    // Grouping on or off changes every alert item's id (a group's `alert:<name>` against its thread
+    // ids): a `sync`, so Inbox drops the old ids at once, rather than a diff of gone and new items.
+    if (cfg().alertGroupsInInbox !== groupsBefore && told.started && !S.stopped) feedEmit('sync', feedSync())
     postState()
     if (signedIn()) void pollNow('settings', true)
   })
@@ -773,12 +777,15 @@ function start(ctx, io = {}) {
   }
 
   /**
-   * The `inbox-item` type of a thread overlay (Inbox's and the buttons' key), or none for an alert
-   * row (it shows several threads and is no feed item).
+   * The `inbox-item` type of a thread overlay (Inbox's and the buttons' key). An alert row's overlay
+   * is one too while the feed sends alert groups (its id is the group's feed id); with that setting
+   * off it is none: it shows several threads and is no feed item.
    */
   function overlayType(id) {
     const which = rowId(id)
-    return which && which.thread ? { name: 'inbox-item', data: { source: ctx.pluginId, id: which.thread } } : null
+    if (which && which.thread) return { name: 'inbox-item', data: { source: ctx.pluginId, id: which.thread } }
+    if (which && which.alert && cfg().alertGroupsInInbox) return { name: 'inbox-item', data: { source: ctx.pluginId, id: F.groupItemId(which.alert) } }
+    return null
   }
 
   /**
@@ -1446,7 +1453,18 @@ function start(ctx, io = {}) {
   /** All items of the scope (`limit`: the contract's 1000 by default; `only`: just that id). */
   function feedList(limit, only) {
     const { rows, threads } = feedRows()
-    return F.feedItems(rows, { me: (S.cache && S.cache.account) || '', jiraKeys: S.jiraKeys, labelNames: S.labels || {}, threads, limit, ...(only !== undefined ? { only } : {}) })
+    return F.feedItems(rows, { me: (S.cache && S.cache.account) || '', jiraKeys: S.jiraKeys, labelNames: S.labels || {}, threads, limit, groups: cfg().alertGroupsInInbox, ...(only !== undefined ? { only } : {}) })
+  }
+
+  /**
+   * The row id (what openThread and markRow take) of a feed item id: a group's feed id is its row id
+   * `alert:<name>` unless the name was too long for the contract (F.groupItemId cut and hashed it),
+   * so the alert rows are searched for it; any other id is a thread id, the same in both.
+   */
+  function rowIdOfItem(id) {
+    if (!id.startsWith(ALERT)) return id
+    const row = feedRows().rows.find((r) => r.kind === 'alert' && F.groupItemId(r.group.name) === id)
+    return row ? row.id : id
   }
 
   /**
@@ -1566,9 +1584,10 @@ function start(ctx, io = {}) {
     if (!item) return refuse('gmail: that thread is not in the inbox (refresh?)')
     if (!item.actions.some((a) => a.id === action)) return refuse(`gmail: this thread has no action "${cut(action, 40)}"`)
     try {
-      if (action === 'open') await openStarted((started) => openThread(id, started))
+      const rid = rowIdOfItem(id)
+      if (action === 'open') await openStarted((started) => openThread(rid, started))
       else {
-        const r = await markRow(id, action === 'markUnread')
+        const r = await markRow(rid, action === 'markUnread')
         if (r.error) return refuse(`gmail: ${r.error}`)
       }
       return { ok: true }
