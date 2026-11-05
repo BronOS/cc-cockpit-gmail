@@ -285,8 +285,10 @@ needs cc-cockpit 0.10.0, and the toolbar buttons below need an app with `ctx.ove
 that has `ctx.overlay.buttons`, the overlay of one of this plugin's own threads gets Mark read / Mark
 unread in its toolbar (the same code as the feed's `act`; a Gmail error shows in the panel's notice),
 and the reader page's Discuss with Claude sends the subject, sender and snippet. Only a thread still in
-the feed gets the buttons: one that left it (no longer in the Unread or Read lanes, e.g. read and older than `readDays`) has none. Only an overlay this plugin or the bundled reviewer (`cockpit.reviewer`) opened gets them (the app's
-`opener`, not the overlay's data): another plugin opening an overlay that names one of our threads gets none. An alert row
+the feed gets the buttons: one that left it (no longer in the Unread or Read lanes, e.g. read and older than `readDays`) has none. Only an overlay this plugin or the project's `reviewer` provider opened gets them (the app's
+`opener`, not the overlay's data; the reviewer is the one `ctx.services.provider('reviewer')` names when the
+buttons are asked for, so a replacement reviewer the project picked gets them and the bundled `cockpit.reviewer`, not
+picked, does not; an older app without `ctx.services.provider` trusts `cockpit.reviewer`): another plugin opening an overlay that names one of our threads gets none. An alert row
 has no type.
 
 ## CLI

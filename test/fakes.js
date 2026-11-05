@@ -382,6 +382,8 @@ function fakeCtx(opts = {}) {
         })
       },
       available: (name) => Boolean(services[name]),
+      // A newer app's pick for a used name (ctx.services.provider); tests that need another reviewer replace it.
+      provider: (name) => (services[name] ? `cockpit.${name}` : null),
       provide(name, impl) {
         ctx.provided[name] = impl
       },

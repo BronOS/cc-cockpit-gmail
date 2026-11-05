@@ -804,9 +804,47 @@ test('overlay buttons: only on overlays we or the reviewer opened, whatever the 
     assert.deepEqual(await provider(by(foreign)), [], `opener ${foreign}`)
   }
   assert.deepEqual(await provider({ type: by('x').type, title: 't' }), [])
-  // Our own reader page and the reviewer we hand the item to do.
+  // Our own reader page and the reviewer we hand the item to (the project's pick) do.
   assert.equal((await provider(by('bronos.gmail'))).length, 1)
+  ctx.services.provider = (name) => (name === 'reviewer' ? 'cockpit.reviewer' : null)
   assert.equal((await provider(by('cockpit.reviewer'))).length, 1)
+  await h.stop()
+})
+
+test('overlay buttons: the reviewer the project picked, asked at button time; the bundled one only when picked', async () => {
+  const { ctx, h } = await signedIn()
+  const provider = ctx.buttonProviders[0].provider
+  const by = (opener) => ({ type: { name: 'inbox-item', data: { source: 'bronos.gmail', id: T.t1, opener: 'bronos.gmail' } }, title: 't', opener })
+  let picked = 'other.reviewer'
+  const asked = []
+  ctx.services.provider = (name) => (asked.push(name), name === 'reviewer' ? picked : null)
+  // A replacement reviewer the project picked gets the buttons; the bundled one, not picked, does not.
+  assert.equal((await provider(by('other.reviewer'))).length, 1)
+  assert.deepEqual(await provider(by('cockpit.reviewer')), [])
+  assert.ok(asked.includes('reviewer'))
+  // The pick changes while we run: the next overlay follows it.
+  picked = 'cockpit.reviewer'
+  assert.equal((await provider(by('cockpit.reviewer'))).length, 1)
+  assert.deepEqual(await provider(by('other.reviewer')), [])
+  // No reviewer reachable, or the app refusing the name: no reviewer is trusted, our own page still is.
+  picked = null
+  assert.deepEqual(await provider(by('cockpit.reviewer')), [])
+  ctx.services.provider = () => {
+    throw new Error('plugin bronos.gmail does not declare service "reviewer" in services.uses')
+  }
+  assert.deepEqual(await provider(by('cockpit.reviewer')), [])
+  assert.equal((await provider(by('bronos.gmail'))).length, 1)
+  await h.stop()
+})
+
+test('overlay buttons: an older app without ctx.services.provider trusts the bundled reviewer only', async () => {
+  const { ctx, h } = await signedIn()
+  const provider = ctx.buttonProviders[0].provider
+  const by = (opener) => ({ type: { name: 'inbox-item', data: { source: 'bronos.gmail', id: T.t1, opener: 'bronos.gmail' } }, title: 't', opener })
+  delete ctx.services.provider
+  assert.equal((await provider(by('cockpit.reviewer'))).length, 1)
+  assert.deepEqual(await provider(by('other.reviewer')), [])
+  assert.equal((await provider(by('bronos.gmail'))).length, 1)
   await h.stop()
 })
 
