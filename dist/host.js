@@ -870,7 +870,7 @@ function start(ctx, io = {}) {
           try {
             // The mail's column header: "Mail" and "Open in Gmail ↗" (the issue's says Jira).
             await reviewer.annotate({ ...base, ...startAt, label: 'Mail', urlLabel: 'Gmail', html: v.html, ...(v.aside ? { aside: v.aside } : {}), ...(v.assets.length ? { assets: v.assets } : {}), companion: v.companion })
-            return
+            return shown()
           } catch (e) {
             if (isMissingAnnotate(e)) noAnnotate()
             else ctx.log.info(`reviewer refused the issue beside ${id} (${e && e.message ? e.message : e}); trying it below the mail`)
@@ -881,7 +881,7 @@ function start(ctx, io = {}) {
         const v = await view(true)
         try {
           await reviewer.annotate({ ...base, ...startAt, html: v.html, ...(v.aside ? { aside: v.aside } : {}), ...(v.assets.length ? { assets: v.assets } : {}) })
-          return
+          return shown()
         } catch (e) {
           if (isMissingAnnotate(e)) noAnnotate()
           else {
@@ -899,7 +899,7 @@ function start(ctx, io = {}) {
             ctx.log.info('reviewer.annotate takes text only: using text for this run')
             postState()
           }
-          return
+          return shown()
         } catch (e) {
           if (!isMissingAnnotate(e)) return setNotice(`The reviewer could not open the mail: ${e.message}${htmlError && htmlError !== e.message ? ` (html: ${htmlError})` : ''}`, 'error')
           noAnnotate()
@@ -1453,14 +1453,23 @@ function start(ctx, io = {}) {
    * every act 10 s, and an open that waited for all that was reported as failed while it was on
    * screen (design-next §3.4: "a source answering act(id, 'open') by opening first"). A failure
    * after the start goes to this panel's notice; one before it is the act's refusal.
+   * An open that ends without anything shown (the reviewer refused the mail, the app refused our
+   * reader page: paths that set the panel's notice and return) is a refusal too, with that notice's
+   * text: resolving there answered ok for nothing on screen, and Inbox ended the item's "back" mark
+   * (phase-1 review round 3). One guard here, not one per early return.
    */
   function openStarted(open) {
     return new Promise((resolve, reject) => {
       let started = false
+      const before = S.notice
       open(() => {
         started = true
         resolve()
-      }).then(resolve, (e) => {
+      }).then(() => {
+        if (started) return
+        const n = S.notice !== before && S.notice && S.notice.kind === 'error' ? S.notice.text : ''
+        reject(new Error(n || 'the mail could not be shown'))
+      }, (e) => {
         if (!started) return reject(e)
         const msg = e && e.message ? e.message : String(e)
         ctx.log.warn(`open: ${msg}`)

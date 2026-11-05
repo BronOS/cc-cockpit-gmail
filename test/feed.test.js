@@ -366,6 +366,34 @@ test('act open with nothing on screen yet (a reviewer without prepare, or a prep
   }
 })
 
+// Round-3 review: an open that ended without anything on screen (the reviewer refused the mail, or
+// the app refused the reader page) set the panel's notice and returned, and act still answered ok.
+test('act open: a reviewer (without prepare) refusing the mail is the act\'s refusal, with the notice\'s text', async () => {
+  const reviewer = {
+    annotate: async () => {
+      throw new Error('reviewer: the review overlay did not open: overlay: at most 3 open')
+    },
+  }
+  const b = await signedIn({ reviewer })
+  const r = await b.feed.act(T.t2, 'open')
+  assert.equal(r.ok, false)
+  assert.match(r.message, /^gmail: The reviewer could not open the mail: .*at most 3 open/)
+  assert.equal(b.h.S.notice.kind, 'error', 'the panel says it too')
+  assert.equal(b.ctx.overlays.length, 0)
+  await b.h.stop()
+})
+
+test('act open: the app refusing our reader page is the act\'s refusal, with the notice\'s text', async () => {
+  const b = await signedIn()
+  b.ctx.overlay.start = () => {
+    throw new Error('overlay: at most 3 open')
+  }
+  const r = await b.feed.act(T.t2, 'open')
+  assert.equal(r.ok, false)
+  assert.match(r.message, /^gmail: Cannot open the reader: overlay: at most 3 open/)
+  await b.h.stop()
+})
+
 test('sync: after activate\'s first cached view (signed out here), carrying the state', async () => {
   const b = boot()
   await b.h.ready
