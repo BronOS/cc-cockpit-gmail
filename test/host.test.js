@@ -27,6 +27,7 @@ function boot(opts = {}) {
     secrets: opts.secrets,
     dataDir: opts.dataDir,
     old: opts.old,
+    buttons: !opts.noButtons,
   })
   let clock = NOW
   const h = host._start(ctx, { setInterval: () => 0, clearInterval: () => {}, fetch: gmail.fetch, now: () => clock, setTimeout: () => 0, clearTimeout: () => {}, cliWaitMs: 3000, imageWaitMs: opts.imageWaitMs })
@@ -741,4 +742,60 @@ test('Gmail gave no read access (403 insufficient scope): the poll says to sign 
   await b.h.pollNow('schedule')
   assert.match(b.ctx.lastState().error, /no read access.*ticked/)
   await b.h.stop()
+})
+
+test('thread overlays: the reader page starts at once with the inbox-item type and ready manual, before the thread is read', async () => {
+  const { ctx, h, gmail } = await signedIn()
+  const reads = () => gmail.calls.filter((x) => /\/threads\//.test(x.path)).length
+  const before = reads()
+  const start = ctx.overlay.start
+  let readsAtStart = -1
+  ctx.overlay.start = (spec) => ((readsAtStart = reads() - before), start(spec))
+  await ctx.sendPanel({ type: 'open', id: T.t1 })
+  assert.equal(readsAtStart, 0, 'the overlay was asked for before the thread was read')
+  const o = ctx.overlays[0]
+  assert.equal(o.spec.ready, 'manual')
+  assert.deepEqual(o.spec.type, { name: 'inbox-item', data: { source: 'bronos.gmail', id: T.t1 } })
+  assert.ok(o.posts.some((p) => p.type === 'doc'))
+  assert.match(o.discuss().text, /^Subject: Re: Q4 budget\nFrom: Ann Smith/)
+  await h.stop()
+})
+
+test('thread overlays: the reviewer gets the type in annotate; an alert row has none', async () => {
+  const calls = []
+  const { ctx, h } = await signedIn({ reviewer: { annotate: async (s) => (calls.push(s), { opened: true }) } })
+  await ctx.sendPanel({ type: 'open', id: T.t1 })
+  assert.deepEqual(calls[0].type, { name: 'inbox-item', data: { source: 'bronos.gmail', id: T.t1 } })
+  await ctx.sendPanel({ type: 'open', id: 'alert:HighCPU' })
+  assert.equal(calls[1].type, undefined)
+  await h.stop()
+})
+
+test('overlay buttons: only for our own items, labels follow state, run = act', async () => {
+  const { ctx, h } = await signedIn()
+  assert.equal(ctx.buttonProviders.length, 1)
+  assert.equal(ctx.buttonProviders[0].name, 'inbox-item')
+  const provider = ctx.buttonProviders[0].provider
+  const own = (id, source = 'bronos.gmail') => ({ type: { name: 'inbox-item', data: { source, id } }, title: 't', opener: 'bronos.gmail' })
+  assert.deepEqual(await provider(own(T.t1, 'bronos.jira')), [])
+  assert.deepEqual(await provider(own('not-a-thread')), [])
+  assert.deepEqual(await provider({ type: { name: 'inbox-item', data: null }, title: 't', opener: 'x' }), [])
+  const before = await provider(own(T.t1))
+  assert.equal(before.length, 1)
+  assert.ok(!before.some((b) => b.id === 'open'))
+  assert.match(before[0].label, /read/i)
+  await before[0].run(own(T.t1))
+  await until(() => true)
+  const after = await provider(own(T.t1))
+  assert.notEqual(after[0].id, before[0].id)
+  assert.notEqual(after[0].label, before[0].label)
+  await h.stop()
+})
+
+test('overlay buttons: a ctx without the member still activates and opens a thread', async () => {
+  const { ctx, h } = await signedIn({ noButtons: true, reviewer: { open: async () => ({}) } })
+  assert.equal(ctx.buttonProviders.length, 0)
+  await ctx.sendPanel({ type: 'open', id: T.t1 })
+  assert.equal(ctx.overlays.length, 1)
+  await h.stop()
 })

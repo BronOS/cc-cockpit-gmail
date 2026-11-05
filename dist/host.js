@@ -723,11 +723,51 @@ function start(ctx, io = {}) {
    */
   async function openThread(id) {
     const pre = await prepareView(id)
+    // Without the reviewer our own reader page is the overlay, so it is up before the thread is read
+    // (`ready: 'manual'`: its loader stays until the page has drawn the mail).
+    const early = pre || annotateOn() ? null : startReader(id, (viewKeyOf(id) || {}).title)
     try {
-      await showThread(id, pre)
+      await showThread(id, pre, early)
     } finally {
       if (pre) await cancelView(pre)
+      if (early && !early.used) early.handle.close()
     }
+  }
+
+  /**
+   * The `inbox-item` type of a thread overlay (Inbox's and the buttons' key), or none for an alert
+   * row (it shows several threads and is no feed item).
+   */
+  function overlayType(id) {
+    const which = rowId(id)
+    return which && which.thread ? { name: 'inbox-item', data: { source: ctx.pluginId, id: which.thread } } : null
+  }
+
+  /** The feed item an `inbox-item` overlay of ours names, or null (the data came from the opener: check it). */
+  function ownItem(info) {
+    const d = info && info.type && info.type.data
+    if (!d || typeof d !== 'object' || d.source !== ctx.pluginId || typeof d.id !== 'string') return null
+    return feedList(Infinity).find((i) => i.id === d.id) || null
+  }
+
+  /** The item's actions but open, with `run` = the same code as the feed's `act`; labels follow the item's state. */
+  function overlayButtons(info) {
+    const item = ownItem(info)
+    if (!item) return []
+    return item.actions.filter((a) => a.id !== 'open').map((a) => ({ id: a.id, label: a.label, run: async () => void (await feedAct(item.id, a.id)) }))
+  }
+
+  /** What Discuss with Claude sends for a thread overlay: subject, sender and snippet, capped. */
+  function overlayDiscuss(id) {
+    const item = feedList(Infinity).find((i) => i.id === id)
+    if (!item) return null
+    const from = item.from ? [item.from.name, item.from.address].filter(Boolean).join(' ') : ''
+    return { text: cut([`Subject: ${item.title}`, from ? `From: ${from}` : '', item.preview || ''].filter(Boolean).join('\n'), 4000) }
+  }
+
+  if (ctx.overlay && typeof ctx.overlay.buttons === 'function') {
+    // Dropped by the app when the plugin stops.
+    ctx.overlay.buttons('inbox-item', (info) => overlayButtons(info))
   }
 
   /**
@@ -765,7 +805,7 @@ function start(ctx, io = {}) {
     await within(reviewer.cancel({ key: pre.key }), FEATURES_WAIT_MS).catch((e) => ctx.log.warn(`reviewer.cancel: ${e && e.message ? e.message : e}`))
   }
 
-  async function showThread(id, pre) {
+  async function showThread(id, pre, early) {
     const t = await loadThread(id)
     if (cfg().markReadOnOpen && canWrite() && t.unreadThreads.length) {
       void writeReadState(t.unreadThreads, false).then((r) => {
@@ -794,7 +834,9 @@ function start(ctx, io = {}) {
     }
     if (annotateOn()) {
       const pick = pickTab(await ctx.sessions.list().catch(() => []))
-      const base = { title: cut(oneLine(t.title), 200) || '(no subject)', ...(t.url ? { url: t.url } : {}), key: t.key, ...(pick.tabId ? { tabId: pick.tabId } : {}) }
+      const type = overlayType(id)
+      // An older reviewer ignores `type`.
+      const base = { title: cut(oneLine(t.title), 200) || '(no subject)', ...(t.url ? { url: t.url } : {}), key: t.key, ...(pick.tabId ? { tabId: pick.tabId } : {}), ...(type ? { type } : {}) }
       let htmlError = null
       if (!S.htmlRejected && jx && beside) {
         const v = await view(true, true)
@@ -840,7 +882,7 @@ function start(ctx, io = {}) {
     }
     // Our own page instead of the reviewer's: its loader goes first (it cannot show this page).
     if (pre) await cancelView(pre)
-    await plainReader(id, t, await view(false))
+    await plainReader(id, t, await view(false), early)
   }
 
   function noAnnotate() {
@@ -854,13 +896,24 @@ function start(ctx, io = {}) {
    * gets the same HTML in parts, then one message per image, so no message passes the page limit.
    * A link click in the page comes back as `{ open }`.
    */
-  async function plainReader(id, t, v) {
-    let handle
+  /** Starts the reader page's overlay (before the thread is read when it can); null when the app refuses. */
+  function startReader(id, title) {
+    const type = overlayType(id)
     try {
-      handle = ctx.overlay.start({ kind: 'html', file: 'panels/thread.html', title: cut(oneLine(t.title), 100) || 'Mail', size: 'large' })
+      const handle = ctx.overlay.start({ kind: 'html', file: 'panels/thread.html', title: cut(oneLine(title || ''), 100) || 'Mail', size: 'large', ready: 'manual', ...(type ? { type } : {}) })
+      if (type && typeof handle.onDiscuss === 'function') handle.onDiscuss(() => overlayDiscuss(type.data.id))
+      return { handle, used: false }
     } catch (e) {
-      return setNotice(`Cannot open the reader: ${e.message}`, 'error')
+      setNotice(`Cannot open the reader: ${e.message}`, 'error')
+      return null
     }
+  }
+
+  async function plainReader(id, t, v, early) {
+    const started = early || startReader(id, t.title)
+    if (!started) return
+    started.used = true
+    const handle = started.handle
     const parts = []
     for (let i = 0; i < v.html.length; i += PAGE_HTML_PART) parts.push(v.html.slice(i, i + PAGE_HTML_PART))
     try {

@@ -71,3 +71,6 @@ document.getElementById('doc').addEventListener('click', (ev) => {
 for (const [id, action] of [['discuss', 'discuss'], ['new', 'newSession'], ['browser', 'browser']]) {
   document.getElementById(id).addEventListener('click', () => ccPanel.post({ result: { action } }))
 }
+
+// ready: 'manual' on the overlay: the app's loader stays until the page says it has drawn.
+ccPanel.ready()

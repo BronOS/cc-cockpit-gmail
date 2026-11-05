@@ -278,6 +278,12 @@ unread (the same write as Mark read). The panel's footer shows the scope line In
 leaves your machine: the data goes to another plugin of the same project. Inbox 0.2.0 reads v2; an
 older Inbox (v1) no longer gets Mail from this version.
 
+**Thread overlays.** A thread opens with the overlay type `inbox-item { source: "bronos.gmail", id }`
+(the reviewer gets it in `annotate`; our own reader page starts at once with `ready: 'manual'`, before
+the thread is read). On an app that has `ctx.overlay.buttons`, the overlay of one of this plugin's own
+threads gets Mark read / Mark unread in its toolbar (the same code as the feed's `act`), and the
+reader page's Discuss with Claude sends the subject, sender and snippet. An alert row has no type.
+
 ## CLI
 
 ```
