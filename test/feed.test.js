@@ -77,6 +77,9 @@ test('feedItems: threads of every lane, an alert group as one item per thread, n
   assert.equal(out[2].read, true)
   assert.equal(F.feedItems(rows, { me: ME, threads, limit: 2 }).length, 2)
   assert.deepEqual(F.feedItems([rows[0], rows[0]], { me: ME }).length, 1)
+  // `only`: the same item as in the whole list, nothing else built.
+  assert.deepEqual(F.feedItems(rows, { me: ME, threads, only: 'a2' }), [out[1]])
+  assert.deepEqual(F.feedItems(rows, { me: ME, threads, only: 'nope' }), [])
   const noThread = F.feedItems([rows[2]], { me: ME, threads: {} })
   assert.deepEqual(noThread, [])
   assert.equal(F.feedItems(Array.from({ length: 1200 }, (_, k) => threadRow(`t${k}`, { latest: { at: k + 1 } })), { me: ME }).length, 1000)
@@ -311,9 +314,27 @@ test('act: a Gmail refusal comes back as { ok: false, message } and the item sta
 test('act open: the thread opens the way a row click does (the plugin\'s reader page with no reviewer)', async () => {
   const b = await signedIn()
   assert.deepEqual(await b.feed.act(T.t2, 'open'), { ok: true })
-  assert.ok(b.gmail.calls.some((c) => c.path.endsWith(`/threads/${T.t2}`) && /format=full/.test(c.url)), 'the thread was read in full')
+  // act answers once the open has started: the read goes on after it.
+  await until(() => b.gmail.calls.some((c) => c.path.endsWith(`/threads/${T.t2}`) && /format=full/.test(c.url)))
+  await until(() => b.ctx.overlays.some((o) => o.posts.some((m) => m.type === 'doc')))
   await b.h.writesIdle()
   assert.deepEqual(b.gmail.state.modifies, [], 'opening marks nothing read')
+  await b.h.stop()
+})
+
+test('act open settles once the reader is up, not when the person closes it; a later failure is a notice', async () => {
+  const b = await signedIn()
+  // Our own reader page stays open (its result never settles), as it does until the person closes it.
+  const start = b.ctx.overlay.start
+  b.ctx.overlay.start = (spec) => ({ ...start(spec), result: new Promise(() => {}) })
+  const late = new Promise((r) => setTimeout(() => r('late'), 1000))
+  assert.deepEqual(await Promise.race([b.feed.act(T.t2, 'open'), late]), { ok: true })
+  await until(() => b.ctx.overlays.some((o) => o.posts.some((m) => m.type === 'doc')))
+  // The thread read fails after the reader started (gone at Google): act already answered ok, the panel says why.
+  delete b.gmail.threads[T.t1]
+  assert.deepEqual(await b.feed.act(T.t1, 'open'), { ok: true })
+  await until(() => b.h.S.notice && b.h.S.notice.kind === 'error')
+  assert.match(b.h.S.notice.text, /^Could not open the mail: /)
   await b.h.stop()
 })
 

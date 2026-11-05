@@ -110,7 +110,9 @@ function threadItem(thread, o = {}) {
  */
 function feedItems(rows, o = {}) {
   const byId = new Map()
+  // `only`: the one id wanted (an overlay's buttons, an act): every other thread is skipped before it is built.
   const add = (thread, extra) => {
+    if (o.only !== undefined && (!thread || thread.id !== o.only)) return
     const it = thread && thread.id && !byId.has(thread.id) ? threadItem(thread, { ...o, ...extra }) : null
     if (it) byId.set(it.id, it)
   }

@@ -721,11 +721,12 @@ function start(ctx, io = {}) {
    * (real-work feedback 8). The annotate below fills that overlay; whatever else happens (a failed
    * read, our own reader page) closes it in the finally.
    */
-  async function openThread(id) {
+  async function openThread(id, onStarted) {
     const pre = await prepareView(id)
     // Without the reviewer our own reader page is the overlay, so it is up before the thread is read
     // (`ready: 'manual'`: its loader stays until the page has drawn the mail).
     const early = pre || annotateOn() ? null : startReader(id, (viewKeyOf(id) || {}).title)
+    if (onStarted) onStarted()
     try {
       await showThread(id, pre, early)
     } finally {
@@ -751,7 +752,7 @@ function start(ctx, io = {}) {
   function ownItem(info) {
     const d = info && info.type && info.type.data
     if (!d || typeof d !== 'object' || d.source !== ctx.pluginId || typeof d.id !== 'string') return null
-    return feedList(Infinity).find((i) => i.id === d.id) || null
+    return feedItemOf(d.id)
   }
 
   /**
@@ -1352,10 +1353,18 @@ function start(ctx, io = {}) {
     return overlayCache(S.cache, new Map([...S.marks].map(([id, m]) => [id, m.unread]))).threads
   }
 
-  /** All items of the scope (`limit`: the contract's 1000 by default). */
-  function feedList(limit) {
+  /** All items of the scope (`limit`: the contract's 1000 by default; `only`: just that id). */
+  function feedList(limit, only) {
     const { rows, threads } = feedRows()
-    return F.feedItems(rows, { me: (S.cache && S.cache.account) || '', jiraKeys: S.jiraKeys, labelNames: S.labels || {}, threads, limit })
+    return F.feedItems(rows, { me: (S.cache && S.cache.account) || '', jiraKeys: S.jiraKeys, labelNames: S.labels || {}, threads, limit, ...(only !== undefined ? { only } : {}) })
+  }
+
+  /**
+   * One feed item by id, or null: the same item feedList(Infinity) holds, without building and
+   * sorting every other one (main asks the overlay buttons after every click and setButtons).
+   */
+  function feedItemOf(id) {
+    return feedList(Infinity, id)[0] || null
   }
 
   /** `ok`, `signedOut` or `error`, with the message the Sync carries. */
@@ -1426,15 +1435,38 @@ function start(ctx, io = {}) {
     feedEmit('sync', feedSync())
   })
 
+  /**
+   * `act(id, 'open')` of the feed: resolves once the open has started (the reviewer's overlay
+   * prepared, or our own reader page up), not when it is over. The rest (reading the mail, the
+   * annotate, and without the reviewer the wait for our reader page to close) runs on: Inbox gives
+   * every act 10 s, and an open that waited for all that was reported as failed while it was on
+   * screen (design-next §3.4: "a source answering act(id, 'open') by opening first"). A failure
+   * after the start goes to this panel's notice; one before it is the act's refusal.
+   */
+  function openStarted(open) {
+    return new Promise((resolve, reject) => {
+      let started = false
+      open(() => {
+        started = true
+        resolve()
+      }).then(resolve, (e) => {
+        if (!started) return reject(e)
+        const msg = e && e.message ? e.message : String(e)
+        ctx.log.warn(`open: ${msg}`)
+        setNotice(`Could not open the mail: ${msg}`, 'error')
+      })
+    })
+  }
+
   async function feedAct(id, action) {
     await ready
     const refuse = (message) => ({ ok: false, message: cut(oneLine(message), 300) })
     if (typeof id !== 'string' || typeof action !== 'string') return refuse('gmail: act takes an item id and an action id')
-    const item = feedList(Infinity).find((i) => i.id === id)
+    const item = feedItemOf(id)
     if (!item) return refuse('gmail: that thread is not in the inbox (refresh?)')
     if (!item.actions.some((a) => a.id === action)) return refuse(`gmail: this thread has no action "${cut(action, 40)}"`)
     try {
-      if (action === 'open') await openThread(id)
+      if (action === 'open') await openStarted((started) => openThread(id, started))
       else {
         const r = await markRow(id, action === 'markUnread')
         if (r.error) return refuse(`gmail: ${r.error}`)
