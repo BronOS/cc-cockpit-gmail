@@ -71,6 +71,11 @@ const JIRA_COMPANION_DOC = { ...JIRA_DOC, maxHtmlBytes: 2000000 }
 // How long an open waits for the reviewer's features() (a host-local call; a provider still
 // activating makes it wait).
 const FEATURES_WAIT_MS = 2000
+// ctx.overlay.start gives no "shown" signal: main's refusal (3 open, 10 a minute) rejects the handle's
+// `result` within one host-to-main round trip, while an overlay that opened settles only when it
+// closes. Our reader page counts as up once this long passed without a rejection (the bundled
+// reviewer's prepare and annotate wait the same).
+const OVERLAY_SETTLE_MS = 500
 const MAIL_IMAGES_WITH_JIRA = { max: 8, totalChars: 4 * 1024 * 1024 }
 const MAX_ASSETS = 30 // the reviewer's cap
 
@@ -241,6 +246,13 @@ function start(ctx, io = {}) {
       out.set(id, { key: f.key, ...(h && h.hint ? { hint: h.hint } : {}), ...(h && h.floor ? { floor: h.floor } : {}) })
     }
     return out
+  }
+
+  /** Resolves null once an overlay is up (no refusal within OVERLAY_SETTLE_MS, or it already ended), else main's refusal. */
+  function overlayRefusal(handle) {
+    let timer
+    const wait = new Promise((resolve) => (timer = setTimeout(resolve, OVERLAY_SETTLE_MS, null)))
+    return Promise.race([handle.result.then(() => null, (e) => e || new Error('refused')), wait]).finally(() => clearTimeout(timer))
   }
 
   /** A promise that rejects after `ms` (the Jira plugin's calls have no timeout of their own). */
@@ -714,8 +726,8 @@ function start(ctx, io = {}) {
    * says it can; a refused companion call is tried once more with the issue below the mail, as an
    * older reviewer gets it, before text.
    * With markReadOnOpen on (off by default) the opened thread (an alert row: the threads it shows) is
-   * marked read in Gmail meanwhile, as Gmail does; not when the sign-in cannot write (the panel asks
-   * to sign in again instead).
+   * marked read in Gmail once it is on screen, as Gmail does; not when the sign-in cannot write (the
+   * panel asks to sign in again instead).
    * The reviewer's overlay is up before the thread is read (its prepare, where it has one): reading a
    * thread with its pictures and its Jira issue takes seconds, with nothing on screen meanwhile
    * (real-work feedback 8). The annotate below fills that overlay; whatever else happens (a failed
@@ -733,7 +745,9 @@ function start(ctx, io = {}) {
     // Without the reviewer our own reader page is the overlay, so it is up before the thread is read
     // (`ready: 'manual'`: its loader stays until the page has drawn the mail).
     const early = pre || annotateOn() ? null : startReader(id, (viewKeyOf(id) || {}).title)
-    if (pre || early) shown()
+    // Our page counts once main did not refuse it (a refused one fails the open in plainReader).
+    if (pre) shown()
+    else if (early) void early.refusal.then((e) => e || shown())
     try {
       await showThread(id, pre, early, shown)
     } finally {
@@ -833,11 +847,19 @@ function start(ctx, io = {}) {
 
   async function showThread(id, pre, early, shown = () => {}) {
     const t = await loadThread(id)
-    if (cfg().markReadOnOpen && canWrite() && t.unreadThreads.length) {
-      void writeReadState(t.unreadThreads, false).then((r) => {
-        if (r.failed && r.failed.length && !r.scope && !S.stopped) setNotice(`Opened, but it could not be marked read in Gmail: ${r.failed[0].message}`, 'error')
-      })
+    // Marked read only once the mail is on screen (the same places shown() runs): marking it right
+    // after the read left a mail read in Gmail whose open was then refused, or whose loader the person
+    // closed (annotate's { opened: false }), so they never saw it (phase-1 review round 4).
+    const seen = () => {
+      shown()
+      if (cfg().markReadOnOpen && canWrite() && t.unreadThreads.length) {
+        void writeReadState(t.unreadThreads, false).then((r) => {
+          if (r.failed && r.failed.length && !r.scope && !S.stopped) setNotice(`Opened, but it could not be marked read in Gmail: ${r.failed[0].message}`, 'error')
+        })
+      }
     }
+    // A loader the person closed while the mail was read: the reviewer shows nothing, so nothing is marked.
+    const opened = (r) => !(r && r.opened === false)
     // Asked only when it can matter: an html annotate this run, and Jira on.
     const beside = annotateOn() && !S.htmlRejected && jiraOn() && !t.alert ? await reviewerHasCompanion() : false
     const jx = await jiraThread(t, { companion: beside }).catch((e) => {
@@ -869,8 +891,9 @@ function start(ctx, io = {}) {
         if (v.companion) {
           try {
             // The mail's column header: "Mail" and "Open in Gmail ↗" (the issue's says Jira).
-            await reviewer.annotate({ ...base, ...startAt, label: 'Mail', urlLabel: 'Gmail', html: v.html, ...(v.aside ? { aside: v.aside } : {}), ...(v.assets.length ? { assets: v.assets } : {}), companion: v.companion })
-            return shown()
+            const r = await reviewer.annotate({ ...base, ...startAt, label: 'Mail', urlLabel: 'Gmail', html: v.html, ...(v.aside ? { aside: v.aside } : {}), ...(v.assets.length ? { assets: v.assets } : {}), companion: v.companion })
+            if (opened(r)) seen()
+            return
           } catch (e) {
             if (isMissingAnnotate(e)) noAnnotate()
             else ctx.log.info(`reviewer refused the issue beside ${id} (${e && e.message ? e.message : e}); trying it below the mail`)
@@ -880,8 +903,9 @@ function start(ctx, io = {}) {
       if (!S.htmlRejected && !S.annotateMissing) {
         const v = await view(true)
         try {
-          await reviewer.annotate({ ...base, ...startAt, html: v.html, ...(v.aside ? { aside: v.aside } : {}), ...(v.assets.length ? { assets: v.assets } : {}) })
-          return shown()
+          const r = await reviewer.annotate({ ...base, ...startAt, html: v.html, ...(v.aside ? { aside: v.aside } : {}), ...(v.assets.length ? { assets: v.assets } : {}) })
+          if (opened(r)) seen()
+          return
         } catch (e) {
           if (isMissingAnnotate(e)) noAnnotate()
           else {
@@ -893,13 +917,14 @@ function start(ctx, io = {}) {
       if (!S.annotateMissing) {
         try {
           text = await withJiraLine()
-          await reviewer.annotate({ ...base, text: cut(text, 400000) })
+          const r = await reviewer.annotate({ ...base, text: cut(text, 400000) })
           if (htmlError) {
             S.htmlRejected = htmlError
             ctx.log.info('reviewer.annotate takes text only: using text for this run')
             postState()
           }
-          return shown()
+          if (opened(r)) seen()
+          return
         } catch (e) {
           if (!isMissingAnnotate(e)) return setNotice(`The reviewer could not open the mail: ${e.message}${htmlError && htmlError !== e.message ? ` (html: ${htmlError})` : ''}`, 'error')
           noAnnotate()
@@ -908,7 +933,7 @@ function start(ctx, io = {}) {
     }
     // Our own page instead of the reviewer's: its loader goes first (it cannot show this page).
     if (pre) await cancelView(pre)
-    await plainReader(id, t, await view(false), early, shown)
+    await plainReader(id, t, await view(false), early, shown, seen)
   }
 
   function noAnnotate() {
@@ -922,35 +947,50 @@ function start(ctx, io = {}) {
    * gets the same HTML in parts, then one message per image, so no message passes the page limit.
    * A link click in the page comes back as `{ open }`.
    */
-  /** Starts the reader page's overlay (before the thread is read when it can); null when the app refuses. */
+  /**
+   * Starts the reader page's overlay (before the thread is read when it can); null when start throws.
+   * `refusal` resolves null once the page is up (OVERLAY_SETTLE_MS without a rejection, or the person
+   * closed it), else main's refusal; `ended` turns true once the overlay ended.
+   */
   function startReader(id, title) {
     const type = overlayType(id)
     try {
       const handle = ctx.overlay.start({ kind: 'html', file: 'panels/thread.html', title: cut(oneLine(title || ''), 100) || 'Mail', size: 'large', ready: 'manual', ...(type ? { type } : {}) })
       if (type && typeof handle.onDiscuss === 'function') handle.onDiscuss(() => overlayDiscuss(type.data.id))
-      return { handle, used: false }
+      const started = { handle, used: false, ended: false, refusal: overlayRefusal(handle) }
+      const end = () => (started.ended = true)
+      handle.result.then(end, end)
+      return started
     } catch (e) {
       setNotice(`Cannot open the reader: ${e.message}`, 'error')
       return null
     }
   }
 
-  async function plainReader(id, t, v, early, shown = () => {}) {
+  async function plainReader(id, t, v, early, shown = () => {}, seen = shown) {
     const started = early || startReader(id, t.title)
     if (!started) return
     started.used = true
+    // start() returns a handle even for an overlay main refuses; the refusal only rejects `result`.
+    const refused = await started.refusal
+    if (refused) return setNotice(`Cannot open the reader: ${refused.message}`, 'error')
     // On screen now; the wait below lasts until the person closes the page (feed act answers here).
     shown()
     const handle = started.handle
     const parts = []
     for (let i = 0; i < v.html.length; i += PAGE_HTML_PART) parts.push(v.html.slice(i, i + PAGE_HTML_PART))
+    let posted = false
     try {
       handle.post({ type: 'doc', title: t.title, parts: parts.length, assets: v.assets.length })
       parts.forEach((part, i) => handle.post({ type: 'html', i, part }))
       for (const a of v.assets) handle.post({ type: 'asset', id: a.id, dataUrl: a.dataUrl })
+      posted = true
     } catch (e) {
       ctx.log.warn(`posting to the reader: ${e.message}`)
     }
+    // Read only when the mail reached a page still open: a post after the person closed the loader
+    // is a silent no-op, so they never saw the mail.
+    if (posted && !started.ended) seen()
     // The links the page may ask to open: the ones this host put into the document (sanitize.js
     // kept only http(s) and mailto, normalised by URL as the page's a.href is). The guide's rule for
     // ctx.openExternal: a URL the host chose, never one taken from the page as is, so a page that

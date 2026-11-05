@@ -323,7 +323,13 @@ test('act open: the thread opens the way a row click does (the plugin\'s reader 
 })
 
 test('act open settles once the reader is up, not when the person closes it; a later failure is a notice', async () => {
-  const b = await signedIn()
+  // The read of T.t1 is slow: it fails after the reader counted as up (OVERLAY_SETTLE_MS).
+  let slow = false
+  const routes = async (u) => {
+    if (slow && u.pathname.endsWith(`/threads/${T.t1}`)) await new Promise((r) => setTimeout(r, 700))
+    return null
+  }
+  const b = await signedIn({ gmail: { routes } })
   // Our own reader page stays open (its result never settles), as it does until the person closes it.
   const start = b.ctx.overlay.start
   b.ctx.overlay.start = (spec) => ({ ...start(spec), result: new Promise(() => {}) })
@@ -332,6 +338,7 @@ test('act open settles once the reader is up, not when the person closes it; a l
   await until(() => b.ctx.overlays.some((o) => o.posts.some((m) => m.type === 'doc')))
   // The thread read fails after the reader started (gone at Google): act already answered ok, the panel says why.
   delete b.gmail.threads[T.t1]
+  slow = true
   assert.deepEqual(await b.feed.act(T.t1, 'open'), { ok: true })
   await until(() => b.h.S.notice && b.h.S.notice.kind === 'error')
   assert.match(b.h.S.notice.text, /^Could not open the mail: /)
@@ -391,6 +398,68 @@ test('act open: the app refusing our reader page is the act\'s refusal, with the
   const r = await b.feed.act(T.t2, 'open')
   assert.equal(r.ok, false)
   assert.match(r.message, /^gmail: Cannot open the reader: overlay: at most 3 open/)
+  await b.h.stop()
+})
+
+// Round-4 review: main never throws from start(); its refusal (3 open, 10 a minute) rejects the
+// handle's result a moment later, and act answered ok for a reader page that never opened. With the
+// bundled reviewer the same refusal makes prepare reject, so nothing counted as shown either.
+test('act open: a reader page whose result rejects (main refused it) is the act\'s refusal, and nothing is marked read', async () => {
+  const b = await signedIn({ project: { markReadOnOpen: true } })
+  const start = b.ctx.overlay.start
+  b.ctx.overlay.start = (spec) => {
+    const h = start(spec)
+    const result = Promise.reject(new Error('overlay: bronos.gmail already has 3 overlays open'))
+    result.catch(() => {})
+    return { ...h, result }
+  }
+  const r = await b.feed.act(T.t2, 'open')
+  assert.equal(r.ok, false)
+  assert.match(r.message, /^gmail: Cannot open the reader: overlay: bronos\.gmail already has 3 overlays open/)
+  await b.h.writesIdle()
+  assert.deepEqual(b.gmail.state.modifies, [], 'a mail never shown stays unread')
+  await b.h.stop()
+})
+
+test('act open: a refused prepare is no open; the loader the person closed (annotate { opened: false }) marks nothing read', async () => {
+  const annotated = []
+  let answer = { opened: true }
+  const reviewer = {
+    prepare: async () => {
+      throw new Error('reviewer: the loading overlay did not open: overlay: at most 3 open')
+    },
+    cancel: async () => ({ closed: false }),
+    annotate: async (s) => (annotated.push(s.key), answer),
+  }
+  const b = await signedIn({ reviewer, project: { markReadOnOpen: true } })
+  // The loader was closed while the mail was read: the reviewer answers { opened: false }.
+  answer = { opened: false }
+  const r = await b.feed.act(T.t2, 'open')
+  assert.equal(r.ok, false, 'no prepared overlay and nothing annotated on screen')
+  assert.deepEqual(annotated.splice(0), [`gmail:${T.t2}`])
+  await b.h.writesIdle()
+  assert.deepEqual(b.gmail.state.modifies, [], 'a mail never shown stays unread')
+  // Shown: marked read now.
+  answer = { opened: true }
+  assert.deepEqual(await b.feed.act(T.t2, 'open'), { ok: true })
+  await b.h.writesIdle()
+  assert.deepEqual(b.gmail.state.modifies.map((m) => m.id), [T.t2])
+  await b.h.stop()
+})
+
+test('markReadOnOpen: our reader page closed before the mail reached it marks nothing read', async () => {
+  const b = await signedIn({ reviewer: null, project: { markReadOnOpen: true } })
+  // The fake page ends at once (dismissed): the person closed the loader while the mail was read.
+  await b.ctx.sendPanel({ type: 'open', id: T.t2 })
+  await b.h.writesIdle()
+  assert.ok(b.ctx.overlays.length >= 1)
+  assert.deepEqual(b.gmail.state.modifies, [])
+  // A page that stays open gets the mail: marked read.
+  const start = b.ctx.overlay.start
+  b.ctx.overlay.start = (spec) => ({ ...start(spec), result: new Promise(() => {}) })
+  assert.deepEqual(await b.feed.act(T.t2, 'open'), { ok: true })
+  await until(() => b.gmail.state.modifies.length === 1)
+  assert.deepEqual(b.gmail.state.modifies.map((m) => m.id), [T.t2])
   await b.h.stop()
 })
 
