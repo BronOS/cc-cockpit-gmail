@@ -152,7 +152,7 @@ function boot(opts = {}) {
   const threads = opts.jira ? { ...base, [ID.jira]: jiraThread() } : base
   const lists = { unread: [T.t1, T.t2, ...(opts.jira ? [ID.jira] : [])], alerts: [T.a1, T.a2, T.a3], read: [T.t3] }
   const gmail = fakeGmail({ tokens: reg, threads, lists, ...(opts.gmail || {}) })
-  const ctx = fakeCtx({ project: { alertSenders: ['alerts@example.com'], ...(opts.project || {}) }, oauth: fakeOAuth(reg), triage: opts.triage === undefined ? fakeTriage() : opts.triage, jira: opts.jira ? fakeJiraService({ issues: { 'ABC-2': { mine: true, done: false } } }) : null })
+  const ctx = fakeCtx({ project: { alertSenders: ['alerts@example.com'], ...(opts.project || {}) }, oauth: fakeOAuth(reg), triage: opts.triage === undefined ? fakeTriage() : opts.triage, jira: opts.jira ? fakeJiraService({ issues: { 'ABC-2': { mine: true, done: false } } }) : null, reviewer: opts.reviewer })
   let clock = NOW
   const h = host._start(ctx, { setInterval: () => 0, clearInterval: () => {}, fetch: gmail.fetch, now: () => clock, setTimeout: () => 0, clearTimeout: () => {}, cliWaitMs: 3000, imageWaitMs: 50 })
   return { gmail, ctx, h, feed: ctx.provided['inbox-feed'], tick: (ms) => (clock += ms) }
@@ -336,6 +336,34 @@ test('act open settles once the reader is up, not when the person closes it; a l
   await until(() => b.h.S.notice && b.h.S.notice.kind === 'error')
   assert.match(b.h.S.notice.text, /^Could not open the mail: /)
   await b.h.stop()
+})
+
+// Round-2 review: act answered ok before anything was on screen, so a failed read went only to this
+// panel's notice and Inbox ended the item's "back" mark for an open the person never saw.
+test('act open with nothing on screen yet (a reviewer without prepare, or a prepare that failed): a failed read is the act\'s refusal', async () => {
+  const annotated = []
+  const reviewers = {
+    'no prepare': { annotate: async (s) => (annotated.push(s.key), { opened: true }) },
+    'prepare failed': {
+      prepare: async () => {
+        throw new Error('reviewer: the review overlay did not open: overlay: at most 3 open')
+      },
+      cancel: async () => ({ closed: false }),
+      annotate: async (s) => (annotated.push(s.key), { opened: true }),
+    },
+  }
+  for (const [name, reviewer] of Object.entries(reviewers)) {
+    const b = await signedIn({ reviewer })
+    delete b.gmail.threads[T.t1]
+    const r = await b.feed.act(T.t1, 'open')
+    assert.equal(r.ok, false, name)
+    assert.match(r.message, /^gmail: /, name)
+    assert.equal(b.ctx.overlays.length, 0, `${name}: no reader page either`)
+    // The same reviewer opens a thread that can be read: ok once the reviewer's overlay is filled.
+    assert.deepEqual(await b.feed.act(T.t2, 'open'), { ok: true }, name)
+    assert.deepEqual(annotated.splice(0), [`gmail:${T.t2}`], name)
+    await b.h.stop()
+  }
 })
 
 test('sync: after activate\'s first cached view (signed out here), carrying the state', async () => {

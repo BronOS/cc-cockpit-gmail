@@ -720,15 +720,22 @@ function start(ctx, io = {}) {
    * thread with its pictures and its Jira issue takes seconds, with nothing on screen meanwhile
    * (real-work feedback 8). The annotate below fills that overlay; whatever else happens (a failed
    * read, our own reader page) closes it in the finally.
+   * `onStarted` (feed act) runs only once something is on screen: the prepared overlay, our reader
+   * page, or (neither: a reviewer without prepare, a prepare that failed or ran past its wait) the
+   * filled view at the end. Called earlier, a failed read reached only this panel's notice while
+   * the person clicked in Inbox, and Inbox ended the item's "back" mark for an open never seen.
    */
   async function openThread(id, onStarted) {
+    const shown = () => {
+      if (onStarted) onStarted()
+    }
     const pre = await prepareView(id)
     // Without the reviewer our own reader page is the overlay, so it is up before the thread is read
     // (`ready: 'manual'`: its loader stays until the page has drawn the mail).
     const early = pre || annotateOn() ? null : startReader(id, (viewKeyOf(id) || {}).title)
-    if (onStarted) onStarted()
+    if (pre || early) shown()
     try {
-      await showThread(id, pre, early)
+      await showThread(id, pre, early, shown)
     } finally {
       if (pre) await cancelView(pre)
       if (early && !early.used) early.handle.close()
@@ -824,7 +831,7 @@ function start(ctx, io = {}) {
     await within(reviewer.cancel({ key: pre.key }), FEATURES_WAIT_MS).catch((e) => ctx.log.warn(`reviewer.cancel: ${e && e.message ? e.message : e}`))
   }
 
-  async function showThread(id, pre, early) {
+  async function showThread(id, pre, early, shown = () => {}) {
     const t = await loadThread(id)
     if (cfg().markReadOnOpen && canWrite() && t.unreadThreads.length) {
       void writeReadState(t.unreadThreads, false).then((r) => {
@@ -901,7 +908,7 @@ function start(ctx, io = {}) {
     }
     // Our own page instead of the reviewer's: its loader goes first (it cannot show this page).
     if (pre) await cancelView(pre)
-    await plainReader(id, t, await view(false), early)
+    await plainReader(id, t, await view(false), early, shown)
   }
 
   function noAnnotate() {
@@ -928,10 +935,12 @@ function start(ctx, io = {}) {
     }
   }
 
-  async function plainReader(id, t, v, early) {
+  async function plainReader(id, t, v, early, shown = () => {}) {
     const started = early || startReader(id, t.title)
     if (!started) return
     started.used = true
+    // On screen now; the wait below lasts until the person closes the page (feed act answers here).
+    shown()
     const handle = started.handle
     const parts = []
     for (let i = 0; i < v.html.length; i += PAGE_HTML_PART) parts.push(v.html.slice(i, i + PAGE_HTML_PART))
@@ -1437,7 +1446,9 @@ function start(ctx, io = {}) {
 
   /**
    * `act(id, 'open')` of the feed: resolves once the open has started (the reviewer's overlay
-   * prepared, or our own reader page up), not when it is over. The rest (reading the mail, the
+   * prepared, or our own reader page up), not when it is over; with neither (a reviewer without
+   * prepare, or a prepare that failed) once the mail is shown, so a failed read is still the act's
+   * refusal. The rest (reading the mail, the
    * annotate, and without the reviewer the wait for our reader page to close) runs on: Inbox gives
    * every act 10 s, and an open that waited for all that was reported as failed while it was on
    * screen (design-next §3.4: "a source answering act(id, 'open') by opening first"). A failure
