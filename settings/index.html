@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Gmail settings</title>
+    <!-- The Gmail plugin's settings page (contributes.settings.page, app scope, 0.6.0): the senders
+      whose remote pictures are always shown (the overlay's "Always show from <sender>" adds to it),
+      under the app's form (Remote images, Image proxy URL template). The list lives in the host's
+      ctx.appStorage (`imageSenders`); this page only shows it and asks the host to add or remove an
+      address, which checks it. The page CSP allows script from this plugin's files only, so the logic
+      is index.js. Drawn with the app's settings classes (`ccc guide style`, "Settings page"). -->
+    <script src="/__sdk/panel.js"></script>
+    <script src="index.js" defer></script>
+    <style>
+      body { margin: 0; background: var(--cc-bg); }
+      [hidden] { display: none; }
+      #main { padding: var(--cc-space-4) var(--cc-space-4) var(--cc-space-5); }
+      .add { display: flex; gap: var(--cc-space-2); align-items: center; }
+      .add input { flex: 1; min-width: 0; }
+      .addr { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+      .cc-settings-card > .cc-empty { padding: var(--cc-space-4); }
+    </style>
+  </head>
+  <body>
+    <div id="main">
+      <section class="cc-settings-group">
+        <div class="cc-settings-head">
+          <h3>Always show remote pictures from</h3>
+          <p class="cc-settings-desc">Mail from these senders opens with its pictures loaded. "Always show from …" in a mail adds its sender here.</p>
+        </div>
+        <div class="cc-settings-card">
+          <div class="cc-settings-row">
+            <div class="cc-settings-row-text">
+              <label class="cc-settings-label" for="address">Add a sender</label>
+              <span class="cc-settings-help">An email address, e.g. news@example.com.</span>
+            </div>
+            <div class="cc-settings-control add">
+              <input id="address" type="email" maxlength="254" placeholder="name@example.com" autocomplete="off" />
+              <button id="add" type="button">Add</button>
+            </div>
+          </div>
+          <div id="error" class="cc-error-line" role="alert" hidden></div>
+          <ul id="list" class="cc-settings-list" aria-label="Senders"></ul>
+          <div id="empty" class="cc-empty" hidden>No sender yet: every mail asks first (unless Remote images is Always).</div>
+        </div>
+      </section>
+    </div>
+  </body>
+</html>

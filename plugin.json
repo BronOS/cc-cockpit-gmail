@@ -1,10 +1,10 @@
 {
   "id": "bronos.gmail",
   "name": "Gmail",
-  "version": "0.5.2",
+  "version": "0.6.0",
   "api": 1,
   "main": "dist/host.js",
-  "description": "Your Gmail in lanes (Unread, Alerts, Read), Grafana alerts grouped, sorted by Jev triage, a thread opened as a clean page to discuss with Claude, Jira mail with its issue (with bronos.jira), mark read / unread. It only ever changes the read state: it never archives, labels, trashes or sends.",
+  "description": "Your Gmail in lanes (Unread, Alerts, Read), Grafana alerts grouped, sorted by Jev triage, a thread opened as a clean page to discuss with Claude (a mail reading layout with cc-cockpit 0.13.0+: remote pictures only when you ask, through an optional proxy, the sender's footer folded), Jira mail with its issue (with bronos.jira), mark read / unread. It only ever changes the read state: it never archives, labels, trashes or sends.",
   "author": "Oleg Bronzov",
   "license": "MIT",
   "contributes": {
@@ -18,6 +18,29 @@
       }
     ],
     "settings": {
+      "app": {
+        "type": "object",
+        "properties": {
+          "remoteImages": {
+            "type": "string",
+            "title": "Remote images",
+            "description": "Pictures a mail loads from the web tell its sender that you opened it. Ask: they are placeholders, and a bar under the subject offers Show images (this mail) and Always show from the sender (the list below this form). Always: every mail's pictures are loaded when it opens. The plugin fetches them, never the page: no cookies, public addresses only, png, jpeg, gif and webp only.",
+            "oneOf": [
+              { "const": "ask", "title": "Ask (default)" },
+              { "const": "always", "title": "Always show" }
+            ],
+            "default": "ask"
+          },
+          "imageProxy": {
+            "type": "string",
+            "title": "Image proxy URL template",
+            "description": "Optional: fetch remote pictures through your own image proxy, so senders see the proxy instead of you. A URL with {url} where the picture's address goes (encoded), e.g. https://img.example.com/?url={url}. Empty: fetched directly. No public proxy is built in.",
+            "maxLength": 500,
+            "default": ""
+          }
+        }
+      },
+      "page": { "entry": "settings/index.html", "scopes": ["app"] },
       "project": {
         "type": "object",
         "properties": {

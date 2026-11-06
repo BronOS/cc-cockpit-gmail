@@ -66,8 +66,8 @@ const ISSUES = {
 function boot(opts = {}) {
   const reg = tokens()
   const base = Object.fromEntries(Object.entries({ t1: T.t1, t2: T.t2, t3: T.t3, a1: T.a1, a2: T.a2, a3: T.a3, c1: T.c1 }).map(([k, id]) => [id, fixture(`thread-${k}.json`)]))
-  const threads = { ...base, ...jiraThreads() }
-  const unread = [T.t1, T.t2, ID.moved, ID.mention, ID.done, ID.other, ID.link, ID.mixed]
+  const threads = { ...base, ...jiraThreads(), ...(opts.extraThreads || {}) }
+  const unread = [T.t1, T.t2, ID.moved, ID.mention, ID.done, ID.other, ID.link, ID.mixed, ...Object.keys(opts.extraThreads || {})]
   const gmail = fakeGmail({ tokens: reg, threads, lists: { unread, alerts: [], read: [T.t3] } })
   const oauth = fakeOAuth(reg)
   const jira = opts.jira === null ? null : opts.jira || fakeJiraService({ issues: ISSUES })
@@ -474,13 +474,59 @@ test('a refused companion call is tried once more with the issue below the mail;
   await d.h.stop()
 })
 
-test('other mail, or Jira off, never asks the reviewer for its features', async () => {
+test('Jira off: no companion even from a reviewer that has one (features are asked for the mail layout)', async () => {
   let asked = 0
-  const reviewer = { features: async () => (asked++, ['companion']), annotate: async () => ({}) }
+  const calls = []
+  const reviewer = { features: async () => (asked++, ['companion']), annotate: async (spec) => (calls.push(spec), {}) }
   const b = await signedIn({ reviewer, jira: null })
   await b.ctx.sendPanel({ type: 'open', id: ID.mention })
-  assert.equal(asked, 0)
+  assert.equal(asked, 1)
+  assert.equal(calls[0].companion, undefined)
+  assert.equal(calls[0].kind, undefined, 'no mail layout without the feature')
   await b.h.stop()
+})
+
+/** A cc-cockpit 0.13.0 reviewer: the mail layout, document buttons and update. */
+function mailReviewer(features = ['companion', 'prepare', 'type', 'mail', 'actions', 'update']) {
+  const r = { calls: [], updates: [], features: async () => features }
+  r.annotate = async (spec) => (r.calls.push(spec), { opened: true })
+  r.update = async (u) => (r.updates.push(u), { updated: true })
+  return r
+}
+
+test('mail layout: the related card from the Jira service, under the subject; the issue still below the mail', async () => {
+  const reviewer = mailReviewer(['mail', 'actions', 'update'])
+  const b = await signedIn({ reviewer })
+  await b.ctx.sendPanel({ type: 'open', id: ID.mention })
+  const c = reviewer.calls[0]
+  assert.equal(c.kind, 'mail')
+  assert.equal(c.aside, undefined, 'the mail layout has no details column')
+  assert.match(c.html, /^<h1>\[Acme\] \(ABC-2\) Rotate keys<\/h1>\n<div class="mail-related"><span class="mail-badge">JIRA<\/span><div class="mail-related-main"><div class="mail-related-title" title="ABC-2 Summary of ABC-2">ABC-2 · Summary of ABC-2<\/div><div class="mail-related-meta">In Progress · Bug · Oleg Example \(you\)<\/div><\/div><a class="mail-related-open" href="https:\/\/acme\.atlassian\.net\/browse\/ABC-2">Open in Jira<\/a><\/div>/)
+  assert.match(c.html, /<h2>Jira issue <a href="https:\/\/acme\.atlassian\.net\/browse\/ABC-2">ABC-2<\/a><\/h2>/)
+  await b.h.stop()
+})
+
+test('mail layout: without an issue lookup the card comes from the mail (its subject, its status move); beside a companion the aside stays', async () => {
+  const reviewer = mailReviewer()
+  // Jira knows no ABC-1 here: the lookup fails, the mail's own words remain.
+  const moved = '<p>Oleg Example changed the status</p><p>Status: To Do <img src="https://acme.atlassian.net/images/arrow.png" alt="&amp;#x2192;" width="16" height="16"> In Progress</p>'
+  const id = '18f0a1b2c3d4e5c1'
+  const extraThreads = { [id]: thread(id, msg(id, { subject: '[Acme] (ABC-1) Checkout fails', snippet: 'moved', html: moved })) }
+  const b = await signedIn({ reviewer, extraThreads, jira: fakeJiraService({ issues: {}, docError: 'jira: busy' }) })
+  await b.ctx.sendPanel({ type: 'open', id })
+  const c = reviewer.calls[reviewer.calls.length - 1]
+  assert.equal(c.kind, 'mail')
+  assert.match(c.html, /<div class="mail-related-title" title="ABC-1 Checkout fails">ABC-1 · Checkout fails<\/div><div class="mail-related-meta">To Do <span class="mail-arrow">→<\/span> <span class="mail-status-to">In Progress<\/span><\/div>/)
+  assert.match(c.html, /Status: To Do {1,2}→ {1,2}In Progress/, 'the arrow picture reads as its (twice escaped) alt')
+  await b.h.stop()
+  // Beside the issue (a companion), the mail keeps its details column.
+  const r2 = mailReviewer()
+  const d = await signedIn({ reviewer: r2 })
+  await d.ctx.sendPanel({ type: 'open', id: ID.mention })
+  assert.ok(r2.calls[0].companion)
+  assert.equal(r2.calls[0].kind, 'mail')
+  assert.match(r2.calls[0].aside, /<dl class="facts">/)
+  await d.h.stop()
 })
 
 test('checkDocument: the title made one line (else Jira issue KEY), the aside only as a string within budget', () => {

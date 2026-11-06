@@ -324,6 +324,69 @@ function jiraSection(o) {
   return { html: parts.join('\n'), aside }
 }
 
+// ---- the related card (0.6.0, the mail layout) ----
+//
+// At the top of a Jira mail: a JIRA badge, the key and the issue's summary, and a status line, with
+// an Open in Jira button. The summary and the status come from the Jira plugin (issue(), asked for
+// the thread view anyway); what the mail itself says fills in when Jira does not answer: the summary
+// from the subject, the status change from the body ("Status: Backlog → Ready to Test"). The change
+// a mail states is shown even when the issue's current status is known: it is what the mail is
+// about. Open is a link to the issue (the browse URL the service gave, else `<site>/browse/<key>`),
+// which the reviewer opens in the browser: Gmail has no path of its own into the Jira plugin's
+// overlay (Jira's inbox-feed `act` only knows the issues its own panel shows), and the overlay beside
+// the mail (the companion) already has the issue itself.
+
+// "Status: Backlog → Ready to Test", "Status Backlog -> Done" (one line; the arrow may have been a
+// picture whose alt the text kept). Either side 1-60 characters, no colon in the old one.
+const CHANGE = /\bstatus\b[ \t]*:?[ \t]*\n?[ \t]*([^\n:→]{1,60}?)[ \t]*(?:→|->|⟶|⇒|=>)[ \t]*([^\n]{1,60}?)[ \t]*(?:\n|$)/i
+
+/** The status change a mail's text states, `{ from, to }`, or null. */
+function statusChange(text) {
+  const m = CHANGE.exec(String(text || ''))
+  if (!m) return null
+  const from = oneLine(m[1])
+  const to = oneLine(m[2])
+  return from && to && from.toLowerCase() !== to.toLowerCase() ? { from, to } : null
+}
+
+/** The summary a Jira subject carries: `[JIRA] (KEY) Summary`, `[Acme] (KEY) Summary`, `Re: KEY Summary` -> `Summary`, or ''. */
+function summaryFromSubject(subject, key) {
+  let t = String(subject || '')
+  for (let i = 0; i < 5 && /^\s*(?:re|fw|fwd|aw|wg)\s*:/i.test(t); i++) t = t.replace(/^\s*(?:re|fw|fwd|aw|wg)\s*:/i, '')
+  // The tags Jira puts first: `[JIRA]`, or the site's name (`[Acme]`), at most two.
+  for (let i = 0; i < 2 && /^\s*\[[^\]\n]{1,40}\]/.test(t); i++) t = t.replace(/^\s*\[[^\]\n]{1,40}\]\s*/, '')
+  if (key) t = t.replace(new RegExp(`^\\s*[([]?${key.replace(/[^A-Z0-9_-]/g, '')}[)\\]]?\\s*:?\\s*`), '')
+  return oneLine(t)
+}
+
+/**
+ * The card's html (mail layout classes: the reviewer styles them under its mail kind).
+ * @param {{ key: string, url?: string, issue?: object | null, change?: { from: string, to: string } | null, subject?: string, esc: Function }} o
+ */
+function relatedCard(o) {
+  const { esc } = o
+  const i = o.issue && typeof o.issue === 'object' ? o.issue : null
+  const summary = cut(oneLine((i && i.summary) || summaryFromSubject(o.subject, o.key)), 300)
+  const title = `${esc(o.key)}${summary ? ` · ${esc(summary)}` : ''}`
+  const meta = []
+  if (o.change) {
+    meta.push(`${esc(cut(o.change.from, 60))} <span class="mail-arrow">→</span> <span class="mail-status-to">${esc(cut(o.change.to, 60))}</span>`)
+    // The mail tells of a move that may since have been followed by another: Jira's status, when it differs.
+    if (i && i.status && oneLine(i.status).toLowerCase() !== o.change.to.toLowerCase()) meta.push(`now ${esc(cut(i.status, 100))}`)
+  } else if (i && i.status) meta.push(i.done ? `<span class="mail-status-to">${esc(cut(i.status, 100))}</span>` : esc(cut(i.status, 100)))
+  if (i && i.type) meta.push(esc(cut(i.type, 60)))
+  if (i && i.assignee) meta.push(`${esc(cut(i.assignee, 100))}${i.mine ? ' (you)' : ''}`)
+  const url = typeof o.url === 'string' && /^https:\/\//.test(o.url) ? o.url : null
+  return [
+    '<div class="mail-related"><span class="mail-badge">JIRA</span>',
+    `<div class="mail-related-main"><div class="mail-related-title" title="${esc(`${o.key}${summary ? ` ${summary}` : ''}`)}">${title}</div>`,
+    meta.length ? `<div class="mail-related-meta">${meta.join(' · ')}</div>` : '',
+    '</div>',
+    url ? `<a class="mail-related-open" href="${esc(url)}">Open in Jira</a>` : '',
+    '</div>',
+  ].join('')
+}
+
 /** One line for the text views (`ccc gmail show` keeps the mail alone; the reviewer's text mode gets this). */
 function jiraLine(key, issue, url) {
   if (!issue) return `Jira issue ${key}${url ? `: ${url}` : ''}`
@@ -331,6 +394,9 @@ function jiraLine(key, issue, url) {
 }
 
 module.exports = {
+  statusChange,
+  summaryFromSubject,
+  relatedCard,
   keyFromSubject,
   keyFromLinks,
   isFromJira,

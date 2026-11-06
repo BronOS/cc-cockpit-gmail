@@ -7,7 +7,10 @@ const fs = require('node:fs')
 const path = require('node:path')
 const { walkMessage, charsetOf, decodeText, imageMime, MAX_PARTS } = require('../dist/lib/mime')
 const img = require('../dist/lib/images')
-const { threadDocument, threadDetails, labelNames, fmtSize, HTML_MAX_BYTES } = require('../dist/lib/document')
+const { threadDocument, threadDetails, labelNames, fmtSize, imagesBar, initials, when, HTML_MAX_BYTES } = require('../dist/lib/document')
+const { remoteAssetId } = require('../dist/lib/sanitize')
+const J = require('../dist/lib/jira')
+const { esc } = require('../dist/lib/entities')
 const { compactMessage } = require('../dist/lib/model')
 const { gmailUrl, alertUrl, readableText, discussPrompt, PROMPT_MAX } = require('../dist/lib/readable')
 const { ALLOWED } = require('../dist/lib/sanitize')
@@ -18,13 +21,17 @@ const b64 = (s, enc = 'utf8') => Buffer.from(s, enc).toString('base64url')
 // What the reviewer keeps (plugins/reviewer/src/page/sanitize.mjs in cc-cockpit, 0.9.1).
 const CLASSES = new Set(['jira-panel', 'jira-panel-info', 'jira-panel-note', 'jira-panel-warning', 'jira-panel-error', 'jira-panel-success', 'mention', 'card', 'card-header', 'meta', 'new', 'old', 'status', 'lozenge', 'lozenge-info', 'lozenge-success', 'lozenge-warning', 'lozenge-error', 'attachment-list', 'fields', 'muted'])
 const TAG_CLASSES = { dl: new Set(['facts']), span: new Set(['person', 'lozenge-neutral', 'lozenge-danger']) }
+// The mail layout's classes (MAIL_CLASSES in the reviewer's sanitize.mjs, cc-cockpit 0.13.0), on any element.
+for (const c of ['mail-msg', 'mail-head', 'mail-avatar', 'mail-who', 'mail-from', 'mail-name', 'mail-addr', 'mail-to', 'mail-when', 'mail-chip', 'mail-body', 'mail-related', 'mail-badge', 'mail-related-main', 'mail-related-title', 'mail-related-meta', 'mail-status-to', 'mail-arrow', 'mail-related-open', 'mail-images-bar', 'mail-images-text', 'mail-cta', 'mail-footer', 'mail-remote', 'mail-minor', 'mail-note']) CLASSES.add(c)
 
 /** Only allowed tags; a class only from the reviewer's lists; no style, no handler, no src. */
 function assertReviewerSafe(html) {
   for (const [, name, attrs] of html.matchAll(/<([a-z][a-z0-9]*)((?: [a-z-]+="[^"]*")*)>/g)) {
     assert.ok(ALLOWED.has(name), `<${name}>`)
     for (const [, k, v] of attrs.matchAll(/ ([a-z-]+)="([^"]*)"/g)) {
-      assert.ok(['href', 'title', 'alt', 'data-asset', 'colspan', 'rowspan', 'class'].includes(k), `${k} on <${name}>`)
+      assert.ok(['href', 'title', 'alt', 'data-asset', 'colspan', 'rowspan', 'class', 'data-action', 'data-part'].includes(k), `${k} on <${name}>`)
+      if (k === 'data-action') assert.ok(name === 'span' && /^[a-z][a-z0-9-]{0,39}$/.test(v), `data-action ${v} on <${name}>`)
+      if (k === 'data-part') assert.ok(['div', 'p', 'span'].includes(name), `data-part on <${name}>`)
       if (k === 'class') for (const c of v.split(' ')) assert.ok(CLASSES.has(c) || (TAG_CLASSES[name] && TAG_CLASSES[name].has(c)), `class ${c} on <${name}>`)
       if (k === 'href') assert.match(v, /^(https:\/\/|http:\/\/|mailto:)/)
     }
@@ -167,14 +174,15 @@ test('threadDocument: one card per message, oldest first; the unread one marked;
   assert.ok(!/alert\(1\)|steal|color:red|track\.example/.test(d.html))
 })
 
-test('threadDocument: a remote picture is a link with a note; a downloaded attachment is a figure', () => {
+test('threadDocument: a remote picture is its label with a note; a downloaded attachment is a figure', () => {
   const html = '<p>Hi</p><img src="https://cdn.example.org/banner.png" alt="Banner">'
   const msg = { id: 'm9', internalDate: '1', labelIds: [], payload: { mimeType: 'multipart/mixed', headers: [{ name: 'From', value: 'A <a@x.org>' }], parts: [{ partId: '0', mimeType: 'text/html', body: { size: html.length, data: b64(html) } }, { partId: '1', mimeType: 'image/png', filename: 'photo.png', body: { size: 2048, attachmentId: 'p' } }, { partId: '2', mimeType: 'image/png', filename: 'huge.png', body: { size: 5e6, attachmentId: 'h' } }] } }
   const d = threadDocument({ title: 'x', messages: [msg], assets: new Map([[img.partKey({ messageId: 'm9', partId: '1' }), 'imgp']]) })
   assertReviewerSafe(d.html)
   assert.equal(d.remoteImages, 1)
-  assert.match(d.html, /1 remote picture is shown as a link: the plugin never loads pictures from the web/)
-  assert.match(d.html, /<a href="https:\/\/cdn\.example\.org\/banner\.png">\[image: Banner\]<\/a>/)
+  assert.match(d.html, /1 remote picture is not shown: senders can tell when you open a mail by them\. Settings › Plugins › Gmail can show them\./)
+  assert.match(d.html, /<span class="muted">\[image: Banner\]<\/span>/)
+  assert.doesNotMatch(d.html, /cdn\.example\.org/, 'no link to the picture: a click would load it outside the rules')
   assert.match(d.html, /<li><figure><img data-asset="imgp" alt="photo\.png" title="photo\.png"><figcaption>photo\.png · 2 KB<\/figcaption><\/figure><\/li><li>huge\.png · 4\.8 MB<\/li>/)
   assert.match(d.html, /<div class="card"><h1>x<\/h1>\n<div class="meta">1 message · latest/, 'without the aside the header card carries the facts')
 })
@@ -237,4 +245,66 @@ test('discussPrompt: starts with "About the mail", never with a character the se
   assert.match(p, /^About the mail "\/clear everything" from !rm\n\nThe thread as it is now \(a read-only copy/)
   assert.ok(discussPrompt('s', 'a', 'x'.repeat(50000)).length <= PROMPT_MAX)
   assert.match(discussPrompt('', '', ''), /^About the mail "\(no subject\)" from unknown/)
+})
+
+// ---- the mail layout (0.6.0, a reviewer with the 'mail' feature) ----
+
+function mailMsg(id, o) {
+  const html = o.html || '<p>Hi</p>'
+  const headers = [{ name: 'From', value: o.from || 'Ann Example <ann@example.com>' }, { name: 'To', value: o.to || 'Me <me@example.com>, Bob Example <bob@example.com>' }, { name: 'Subject', value: o.subject || 'Hello' }]
+  if (o.cc) headers.push({ name: 'Cc', value: o.cc })
+  return { id, internalDate: String(o.at || 0), labelIds: o.unread ? ['UNREAD', 'INBOX'] : ['INBOX'], payload: { mimeType: 'text/html', headers, body: { size: html.length, data: b64(html) } } }
+}
+
+test('mail layout: the subject first, then each message with avatar, sender line, "to …", time and Unread chip; no aside', () => {
+  const at = Date.UTC(2026, 10, 6, 14, 9)
+  const d = threadDocument({ title: 'Your order', mail: true, now: at + 60000, aside: false, messages: [mailMsg('m1', { at, unread: true, cc: 'Carol Example <carol@example.com>' })] })
+  assertReviewerSafe(d.html)
+  assert.match(d.html, /^<h1>Your order<\/h1>\n<div class="mail-msg"><div class="mail-head"><div class="mail-avatar">AE<\/div><div class="mail-who"><div class="mail-from"><span class="mail-name">Ann Example<\/span><span class="mail-addr">ann@example\.com<\/span><\/div><div class="mail-to">to Me, Bob Example · cc Carol Example<\/div><\/div><div class="mail-when">Today \d\d:\d\d<br><span class="mail-chip">Unread<\/span><\/div><\/div>/)
+  assert.match(d.html, /<div class="mail-body"><p>Hi<\/p><\/div><\/div>$/)
+  assert.doesNotMatch(d.html, /class="card/, 'no cards, no tint')
+  assert.equal(d.aside, undefined)
+  assert.deepEqual([initials('Ann Example', 'ann@example.com'), initials('Example (Jira)', 'x@example.com'), initials('', 'zed@example.com')], ['AE', 'E', 'Z'])
+  assert.match(when(at, at + 1000), /^Today /)
+  assert.doesNotMatch(when(at, at + 3 * 86400000), /^Today/)
+})
+
+test('mail layout: remote pictures are placeholders; the bar counts the ones not shown and offers the buttons when asked', () => {
+  const html = '<p>Sale</p><img src="https://cdn.example.com/hero.png" alt="Hero" width="600"><img src="https://cdn.example.com/two.png" alt="Two" width="600"><img src="https://cdn.example.com/logo.png" alt="Example Co">'
+  const msgs = [mailMsg('m1', { html })]
+  const plain = threadDocument({ title: 's', mail: true, messages: msgs })
+  assertReviewerSafe(plain.html)
+  assert.equal(plain.remoteImages, 2, 'the logo is not counted: it is hidden either way')
+  assert.equal(plain.remote.length, 3)
+  assert.deepEqual(plain.remote.map((r) => [r.messageId, r.address]), [['m1', 'ann@example.com'], ['m1', 'ann@example.com'], ['m1', 'ann@example.com']])
+  assert.match(plain.html, /<div class="mail-images-bar" data-part="images-bar"><span class="mail-images-text">2 remote images are not shown \(senders can track when you open mail\)\.<\/span><\/div>/)
+  const asked = threadDocument({ title: 's', mail: true, messages: msgs, images: { actions: true, address: 'ann@example.com' } })
+  assertReviewerSafe(asked.html)
+  assert.match(asked.html, /<span data-action="show-images">Show images<\/span> <span data-action="always-sender" title="Always show the pictures of mail from ann@example\.com">Always show from ann@example\.com<\/span><\/div>/)
+  // The ones the host loaded are not counted; none left, no bar.
+  const hero = remoteAssetId('https://cdn.example.com/hero.png')
+  const two = remoteAssetId('https://cdn.example.com/two.png')
+  assert.equal(threadDocument({ title: 's', mail: true, messages: msgs, remote: { loaded: (id) => id === hero } }).remoteImages, 1)
+  assert.doesNotMatch(threadDocument({ title: 's', mail: true, messages: msgs, remote: { loaded: (id) => id === hero || id === two } }).html, /mail-images-bar/)
+  assert.equal(imagesBar(1, {}).includes('1 remote image is not shown'), true)
+})
+
+test('mail layout: the related Jira card under the subject, from the mail\'s words or from the Jira service', () => {
+  // From the mail alone (no lookup answered): the subject's summary and the status move.
+  const change = J.statusChange('Ann Example changed the status\nStatus: Backlog → Ready to Test\n')
+  assert.deepEqual(change, { from: 'Backlog', to: 'Ready to Test' })
+  const fromMail = J.relatedCard({ key: 'ABC-1', url: 'https://jira.example.com/browse/ABC-1', issue: null, change, subject: '[JIRA] (ABC-1) Checkout fails', esc })
+  assert.equal(fromMail, '<div class="mail-related"><span class="mail-badge">JIRA</span><div class="mail-related-main"><div class="mail-related-title" title="ABC-1 Checkout fails">ABC-1 · Checkout fails</div><div class="mail-related-meta">Backlog <span class="mail-arrow">→</span> <span class="mail-status-to">Ready to Test</span></div></div><a class="mail-related-open" href="https://jira.example.com/browse/ABC-1">Open in Jira</a></div>')
+  // From the service: its summary, status, type and assignee; a later move shows as "now …".
+  const issue = { summary: 'Checkout fails on Safari', status: 'In Progress', type: 'Bug', assignee: 'Ann Example', mine: true }
+  const fromJira = J.relatedCard({ key: 'ABC-1', url: 'https://jira.example.com/browse/ABC-1', issue, change: null, subject: 'x', esc })
+  assert.match(fromJira, /ABC-1 · Checkout fails on Safari<\/div><div class="mail-related-meta">In Progress · Bug · Ann Example \(you\)<\/div>/)
+  assert.match(J.relatedCard({ key: 'ABC-1', issue, change, esc }), /Ready to Test<\/span> · now In Progress · Bug/)
+  assert.doesNotMatch(J.relatedCard({ key: 'ABC-1', url: 'javascript:alert(1)', esc }), /href/, 'https links only')
+  assert.equal(J.statusChange('no move here'), null)
+  assert.equal(J.statusChange('Status: Done → Done'), null)
+  assert.equal(J.summaryFromSubject('Re: [JIRA] (ABC-1) Checkout fails', 'ABC-1'), 'Checkout fails')
+  const d = threadDocument({ title: 'ABC-1', mail: true, related: fromMail, note: 'a note', messages: [mailMsg('m1', {})] })
+  assertReviewerSafe(d.html)
+  assert.match(d.html, /^<h1>ABC-1<\/h1>\n<div class="mail-related">.*<\/div>\n<p class="mail-note"><em>a note<\/em><\/p>\n<div class="mail-msg">/)
 })

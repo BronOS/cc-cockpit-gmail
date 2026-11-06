@@ -32,7 +32,7 @@ test('the manifest: id, api, entry points and files exist', () => {
   }
   assert.deepEqual(manifest.services.uses, { triage: 1, reviewer: 1, jira: 1 })
   assert.deepEqual(manifest.services.provides, { 'inbox-feed': 2 })
-  assert.equal(manifest.version, '0.5.2')
+  assert.equal(manifest.version, '0.6.0')
   assert.equal(manifest.contributes.cli[0].name, 'gmail')
 })
 

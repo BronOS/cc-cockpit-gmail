@@ -10,6 +10,16 @@
 // Size: the reviewer takes at most 2 MiB of html and 100,000 characters of aside. A message body
 // over 1 MB of markup becomes its plain text (cut); when the cards do not fit, the oldest messages
 // give way first, with a line that says how many are left out (the newest are what matters).
+//
+// The mail layout (0.6.0, `o.mail`, for a reviewer with the 'mail' feature: app 0.13.0): the subject
+// as the page's h1, then each message as a `mail-msg` with its own header row (`mail-head`: avatar
+// initials, sender name and address, "to …", the time at the right with an Unread chip under it),
+// no card and no tint on unread mail (the overlay is neutral; the source's colour is the toolbar's).
+// A related item's card (`o.related`, the Jira issue a mail is about) and the remote-images bar
+// (`o.images`) come under the subject. Remote pictures are placeholders the reviewer fills later
+// (sanitize.js), so a mail's html does not depend on whether its pictures were loaded: buildCards
+// runs once, the host loads what it may, and threadDocument assembles. Without `o.mail` the layout is
+// the one before 0.6.0 (cards), for an older reviewer and the plugin's own reader page.
 
 const { esc } = require('./entities')
 const { sanitizeHtml, textToHtml, htmlToText } = require('./sanitize')
@@ -17,6 +27,10 @@ const { walkMessage } = require('./mime')
 const { compactMessage, parseAddressList, displayName } = require('./model')
 const { partKey } = require('./images')
 const { stamp, cut } = require('./util')
+
+const REMOTE_BAR_PART = 'images-bar' // the bar's data-part: hidden by update() once the pictures are in
+const ACTION_SHOW = 'show-images'
+const ACTION_ALWAYS = 'always-sender'
 
 const HTML_MAX_BYTES = 2000000 // below the reviewer's 2 MiB (2,097,152), counted in UTF-8 bytes
 const BODY_MAX_BYTES = 1000000
@@ -62,25 +76,31 @@ function labelNames(ids, names = {}) {
  * @param {string} [o.tail] html that follows the messages (the "Jira issue" section, 0.2.0); its bytes
  *   count against the budget first, so the oldest messages give way rather than the cut falling in it
  * @param {string} [o.asideTail] html added to the end of the details column (the issue's facts)
- * @returns {{ html: string, aside?: string, omitted: number, remoteImages: number }}
+ * @param {boolean} [o.mail] the mail layout (see the header); remote pictures as placeholders
+ * @param {{ loaded?: (id: string) => boolean }} [o.remote] which remote pictures the host loaded (their
+ *   assets go with the annotate): those are not counted in the bar (and, outside the mail layout, are
+ *   written as pictures instead of their labels)
+ * @param {{ actions?: boolean, address?: string }} [o.images] the bar's buttons and the sender they name
+ * @param {string} [o.related] the related item's card (jira.js relatedCard), under the subject
+ * @param {number} [o.now] the clock, for "Today 09:09"
+ * @param {object} [o.built] buildCards' answer for these options, when the host already built it
+ * @returns {{ html: string, aside?: string, omitted: number, remoteImages: number, remote: object[] }}
  */
 function threadDocument(o) {
-  const assets = o.assets || new Map()
-  const msgs = [...o.messages].sort((a, b) => Number(a.internalDate || 0) - Number(b.internalDate || 0))
-  const facts = msgs.map(compactMessage)
-  let remoteImages = 0
-  const cards = msgs.map((raw, i) => {
-    const r = messageCard(raw, facts[i], assets, o.bodies)
-    remoteImages += r.remoteImages
-    return r.html
-  })
+  const built = o.built || buildCards(o)
+  const { facts, cards } = built
+  const loaded = o.remote && typeof o.remote.loaded === 'function' ? o.remote.loaded : () => false
+  // Not shown: each remote picture once, the ones the host did not load. A minor one (a logo, an
+  // avatar, a tiny spacer) is not counted: it is hidden either way, and a bar for a lone logo is noise.
+  const remoteImages = built.remote.filter((r) => !loaded(r.id) && !r.minor).length
   const parts = []
-  const head = o.aside
-    ? `<div class="card"><h1>${esc(o.title || '(no subject)')}</h1></div>`
-    : headerCard(o.title, facts, o.labels)
+  let head
+  if (o.mail) head = `<h1>${esc(o.title || '(no subject)')}</h1>`
+  else head = o.aside ? `<div class="card"><h1>${esc(o.title || '(no subject)')}</h1></div>` : headerCard(o.title, facts, o.labels)
   parts.push(head)
-  if (o.note) parts.push(`<p class="muted"><em>${esc(o.note)}</em></p>`)
-  if (remoteImages) parts.push(`<p class="muted">${remoteImages} remote picture${remoteImages === 1 ? ' is' : 's are'} shown as a link: the plugin never loads pictures from the web (they can tell the sender you read the mail).</p>`)
+  if (o.mail && typeof o.related === 'string' && o.related) parts.push(o.related)
+  if (o.note) parts.push(o.mail ? `<p class="mail-note"><em>${esc(o.note)}</em></p>` : `<p class="muted"><em>${esc(o.note)}</em></p>`)
+  if (remoteImages) parts.push(o.mail ? imagesBar(remoteImages, o.images || {}) : `<p class="muted">${remoteImages} remote picture${remoteImages === 1 ? ' is' : 's are'} not shown: senders can tell when you open a mail by them. Settings › Plugins › Gmail can show them.</p>`)
   const tail = typeof o.tail === 'string' && o.tail ? o.tail : ''
   const fixed = bytes(parts.join('\n')) + bytes(tail) + 2000
   let room = HTML_MAX_BYTES - fixed
@@ -95,7 +115,7 @@ function threadDocument(o) {
   if (omitted) parts.push(`<p><em>${omitted} earlier message${omitted === 1 ? ' is' : 's are'} not shown here (too long together); Gmail has ${omitted === 1 ? 'it' : 'them'}.</em></p>`)
   parts.push(...kept)
   if (tail) parts.push(tail)
-  const out = { html: parts.join('\n'), omitted, remoteImages }
+  const out = { html: parts.join('\n'), omitted, remoteImages, remote: built.remote }
   if (o.aside) {
     out.aside = threadDetails(facts, o.url, o.labels)
     if (o.asideTail && out.aside.length + o.asideTail.length <= ASIDE_MAX) out.aside += o.asideTail
@@ -103,8 +123,74 @@ function threadDocument(o) {
   return out
 }
 
+/**
+ * The messages as html, oldest first, before they are put together: `{ facts, cards, remote,
+ * remoteImages }`. `remote`: each remote picture of the thread once (sanitize.js), with the message
+ * and the sender it came from (the always-show list is per sender). Options as threadDocument's.
+ */
+function buildCards(o) {
+  const assets = o.assets || new Map()
+  const msgs = [...o.messages].sort((a, b) => Number(a.internalDate || 0) - Number(b.internalDate || 0))
+  const facts = msgs.map(compactMessage)
+  let remoteImages = 0
+  const remote = new Map()
+  const cards = msgs.map((raw, i) => {
+    const r = messageCard(raw, facts[i], assets, o.bodies, { mail: Boolean(o.mail), remote: o.remote, now: o.now })
+    remoteImages += r.remoteImages
+    for (const x of r.remote) if (!remote.has(x.id)) remote.set(x.id, { ...x, messageId: String(raw.id), address: facts[i].address })
+    return r.html
+  })
+  return { facts, cards, remote: [...remote.values()], remoteImages }
+}
+
+/**
+ * The remote-images bar of the mail layout: how many are not shown and why, and (`actions`: a
+ * reviewer with the 'actions' and 'update' features) Show images and Always show from <sender>. The
+ * reviewer turns each `data-action` span into a button and tells the host of a click; the bar is a
+ * `data-part`, so update() hides it once the pictures are in.
+ */
+function imagesBar(n, o) {
+  const text = `${n} remote image${n === 1 ? ' is' : 's are'} not shown (senders can track when you open mail).`
+  const buttons = []
+  if (o.actions) {
+    buttons.push(`<span data-action="${ACTION_SHOW}">Show images</span>`)
+    const a = typeof o.address === 'string' ? o.address : ''
+    if (a) buttons.push(`<span data-action="${ACTION_ALWAYS}" title="${esc(`Always show the pictures of mail from ${a}`)}">${esc(cut(`Always show from ${a}`, 60))}</span>`)
+  }
+  return `<div class="mail-images-bar" data-part="${REMOTE_BAR_PART}"><span class="mail-images-text">${esc(text)}</span>${buttons.length ? ` ${buttons.join(' ')}` : ''}</div>`
+}
+
+/** "AE" for Ann Example (a "(Jira)" or "via …" part left out); the address's first letter without a name. */
+function initials(name, address) {
+  const words = String(name || '')
+    .replace(/\([^)]*\)|\[[^\]]*\]/g, ' ')
+    .replace(/\bvia\b.*$/i, ' ')
+    .split(/[\s,._-]+/)
+    .map((w) => [...w].find((ch) => /\p{L}|\p{N}/u.test(ch)))
+    .filter(Boolean)
+  if (words.length >= 2) return (words[0] + words[words.length - 1]).toUpperCase()
+  if (words.length === 1) return words[0].toUpperCase()
+  const first = [...String(address || '')].find((ch) => /\p{L}|\p{N}/u.test(ch))
+  return first ? first.toUpperCase() : '?'
+}
+
+/** "Today 09:09" for a time of today, else the date and time (stamp). */
+function when(ms, now) {
+  if (!ms) return ''
+  const t = stamp(ms)
+  return now && stamp(now).slice(0, 10) === t.slice(0, 10) ? `Today ${t.slice(11)}` : t
+}
+
+/** The names of an address header for "to …": at most `max`, the rest counted. */
+function names(header, max = 4) {
+  const list = parseAddressList(header)
+  const shown = list.slice(0, max).map((a) => esc(displayName(a)))
+  if (list.length > max) shown.push(`+${list.length - max}`)
+  return shown.join(', ')
+}
+
 /** One message as a card: header (sender, address, date, unread), To / Cc, body, attachments. */
-function messageCard(raw, m, assets, bodies) {
+function messageCard(raw, m, assets, bodies, x = {}) {
   const w = walkMessage(raw)
   const extra = bodies && bodies.get(String(raw.id))
   const html = w.html || (extra && extra.html) || null
@@ -118,14 +204,18 @@ function messageCard(raw, m, assets, bodies) {
   let body = ''
   let used = new Set()
   let remoteImages = 0
+  let remote = []
   if (html) {
-    const r = sanitizeHtml(html, { cid: (k) => cidAsset.get(k) || null })
+    const loaded = x.remote && typeof x.remote.loaded === 'function' ? x.remote.loaded : undefined
+    const r = sanitizeHtml(html, { cid: (k) => cidAsset.get(k) || null, mail: x.mail, remote: { mode: x.mail ? 'placeholder' : 'label', loaded } })
     body = r.html
     used = r.usedCids
     remoteImages = r.remoteImages
+    remote = r.remote
     if (bytes(body) > BODY_MAX_BYTES) {
       body = `<p><em>This mail is too big to show formatted; its text follows.</em></p>\n${textToHtml(cut(plain || htmlToText(html), 300000))}`
       used = new Set()
+      remote = [] // its text only now: no picture of it is shown
     }
     if (!body.trim() && plain) body = textToHtml(plain)
   } else if (plain) {
@@ -133,11 +223,21 @@ function messageCard(raw, m, assets, bodies) {
   }
   if (!body.trim()) body = m.snippet ? `<p>${esc(m.snippet)}</p>` : '<p><em>(no text)</em></p>'
 
+  if (x.mail) {
+    const files = attachmentsHtml(raw, w, used, assets)
+    const name = m.from || m.address || 'unknown'
+    const from = `<div class="mail-from"><span class="mail-name">${esc(name)}</span>${m.address && m.address !== name ? `<span class="mail-addr">${esc(m.address)}</span>` : ''}</div>`
+    const to = [m.to ? `to ${names(m.to)}` : '', m.cc ? `cc ${names(m.cc)}` : ''].filter(Boolean).join(' · ')
+    const time = `<div class="mail-when">${esc(when(m.at, x.now))}${m.unread ? '<br><span class="mail-chip">Unread</span>' : ''}</div>`
+    const head = `<div class="mail-head"><div class="mail-avatar">${esc(initials(m.from, m.address))}</div><div class="mail-who">${from}${to ? `<div class="mail-to">${to}</div>` : ''}</div>${time}</div>`
+    return { html: `<div class="mail-msg">${head}\n<div class="mail-body">${body}</div>${files ? `\n${files}` : ''}</div>`, remoteImages, remote }
+  }
+
   const who = `<strong>${esc(m.from || m.address || 'unknown')}</strong>${m.address && m.address !== m.from ? ` <span class="muted">&lt;${esc(m.address)}&gt;</span>` : ''}`
   const head = `<div class="card-header">${who} · ${esc(stamp(m.at))}${m.unread ? ' · <span class="lozenge lozenge-info">unread</span>' : ''}</div>`
   const meta = [m.to ? `To: ${esc(m.to)}` : '', m.cc ? `Cc: ${esc(m.cc)}` : ''].filter(Boolean).join(' · ')
   const files = attachmentsHtml(raw, w, used, assets)
-  return { html: `<div class="card${m.unread ? ' new' : ''}">${head}${meta ? `\n<div class="meta">${meta}</div>` : ''}\n${body}${files ? `\n${files}` : ''}</div>`, remoteImages }
+  return { html: `<div class="card${m.unread ? ' new' : ''}">${head}${meta ? `\n<div class="meta">${meta}</div>` : ''}\n${body}${files ? `\n${files}` : ''}</div>`, remoteImages, remote }
 }
 
 /**
@@ -201,4 +301,4 @@ function headerCard(title, facts, labelMap) {
   return `<div class="card"><h1>${esc(title || '(no subject)')}</h1>\n<div class="meta">${meta.join(' · ')}</div></div>`
 }
 
-module.exports = { threadDocument, threadDetails, messageCard, labelNames, fmtSize, HTML_MAX_BYTES, SYSTEM_LABELS }
+module.exports = { threadDocument, buildCards, threadDetails, messageCard, imagesBar, initials, when, labelNames, fmtSize, HTML_MAX_BYTES, SYSTEM_LABELS, REMOTE_BAR_PART, ACTION_SHOW, ACTION_ALWAYS }

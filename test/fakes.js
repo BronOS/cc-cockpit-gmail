@@ -255,7 +255,7 @@ function fakeCtx(opts = {}) {
     pluginId: 'bronos.gmail',
     projectDir: dataDir,
     dataDir,
-    settings: Object.freeze({ project: opts.project || {}, app: {} }),
+    settings: Object.freeze({ project: opts.project || {}, app: opts.app || {} }),
     posts: [],
     headers: [],
     badges: [],
@@ -271,11 +271,32 @@ function fakeCtx(opts = {}) {
       settingsListeners.push(fn)
       return () => {}
     },
-    async changeSettings(project) {
-      ctx.settings = Object.freeze({ project, app: {} })
+    async changeSettings(project, app = ctx.settings.app) {
+      ctx.settings = Object.freeze({ project, app })
       for (const fn of settingsListeners) await fn(ctx.settings)
     },
     storage: opts.storage || fakeStorage(),
+    appStorage: opts.appStorage || fakeStorage(),
+    // The html settings page's backend (app 0.10.1+): openSettingsPage() plays the page.
+    settingsPage: {
+      onOpen(fn) {
+        ctx.settingsPageOpen = fn
+        return () => {}
+      },
+    },
+    openSettingsPage(scope = 'app') {
+      const page = { scope, posts: [], listeners: [], closers: [] }
+      ctx.settingsPageOpen({ scope, post: (m) => page.posts.push(structuredClone(m)), onMessage: (fn) => (page.listeners.push(fn), () => {}), onClose: (fn) => (page.closers.push(fn), () => {}) })
+      page.send = async (m) => {
+        for (const fn of page.listeners) await fn(structuredClone(m))
+      }
+      return page
+    },
+    /** A service event to our `use` handle's listeners (as the provider's ctx.services.emit). */
+    async serviceEvent(name, event, data) {
+      const h = ctx.handles[name]
+      for (const fn of (h && h.listeners[event]) || []) await fn(structuredClone(data))
+    },
     secrets: opts.secrets || fakeSecrets(),
     oauth: opts.oauth,
     log: {
@@ -405,6 +426,7 @@ function fakeCtx(opts = {}) {
     delete ctx.openExternal
     delete ctx.panels.header
     delete ctx.panels.onAction
+    delete ctx.settingsPage
   }
   // `opts.buttons`: an app with ctx.overlay.buttons (the inbox redesign); without it, as before.
   if (opts.buttons) ctx.overlay.buttons = (name, provider) => (ctx.buttonProviders.push({ name, provider }), () => {})
