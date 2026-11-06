@@ -19,6 +19,10 @@ function that can do nothing else. Since 0.3.0 it asks Google for `gmail.modify`
   with its sender, recipients and time in one header, the text in a 760 px reading column, the
   sender's footer folded away, a card for the Jira issue of a Jira mail, and remote pictures only
   when you ask (see "Remote images").
+- **Original view** (0.6.0, with cc-cockpit 0.13.0 or later): a mail opens as its sender designed
+  it (its layout tables, colours and struck-out values), in a sealed frame that runs no script and
+  loads nothing from the web; **Original | Reader** above the mail switches to the reading layout,
+  and the choice is remembered per sender (see "The thread view").
 - **Mark read / Mark unread** (0.3.0): a button on each row; opening a thread leaves it unread
   unless you turn on `markReadOnOpen` (then it is marked read, as Gmail does).
 - **Jira mail** (0.2.0, with the [Jira plugin](https://github.com/BronOS/cc-cockpit-jira) enabled in
@@ -154,6 +158,7 @@ ccc plugin config bronos.gmail 'lanes={"unread":true,"alerts":true,"read":false}
 | Setting | Default | |
 |---|---|---|
 | Remote images (`remoteImages`) | Ask | Ask: remote pictures are placeholders and a bar offers **Show images** and **Always show from &lt;sender&gt;**. Always: every mail's pictures load when it opens |
+| Mail opens in (`defaultView`) | Original | the view a mail opens in when you have not picked one for its sender yet: Original (as the sender designed it) or Reader (the clean reading layout). Needs cc-cockpit 0.13.0 or later |
 | Image proxy URL template (`imageProxy`) | empty | fetch remote pictures through your own image proxy: a URL with `{url}` where the picture's address goes, URL-encoded, e.g. `https://img.example.com/?url={url}`. Empty: fetched directly. No public proxy is built in |
 
 Under the form, **Always show remote pictures from** lists the senders whose mail opens with its
@@ -225,6 +230,20 @@ next line, and the time on the right ("Today 09:09") with an Unread chip under i
 a column of at most 760 px; a lone "View …" or "Open …" link is drawn as a button, other links stay
 calm. There is no details column (the headers carry it) unless the Jira issue is shown beside the mail.
 
+**Original | Reader** (0.6.0, with cc-cockpit 0.13.0 or later). A mail with an HTML part opens in
+the **Original** view: each message as its sender designed it, on a white page under the same
+header, with its layout tables, `<style>` blocks and inline styles. It is built by the plugin's
+original-mode sanitizer (scripts, frames, forms, meta refresh, `<link>`, `<base>`, event attributes
+and `javascript:` links go; CSS keeps no `url()` but pictures already in the mail, no `@import`, no
+`position: fixed`), and the reviewer shows it in a sandboxed frame that runs no script and may load
+only the pictures the plugin hands it. Links inside it do not open on a click: the **Links** button
+above the mail lists them, and they open in your browser from there. **Reader** is the reading layout
+described above (footer folded, quoted history folded). Notes and Discuss work on the Reader text: a
+note clicked while in Original switches to Reader. The switch is remembered for the sender's address,
+app-wide (at most 500 senders); a sender you never switched opens in the `defaultView` setting. A mail
+falls back to Reader when it has no HTML part, its CSS is over 200,000 characters, all the originals of
+a thread pass 2 MB, or the app's reviewer has no Original view.
+
 With an older app, each message is a card: sender, address, date, To and Cc, an "unread" mark, then
 the body, then its attachments, and the details column has From, To, Cc, the dates, the labels, the
 message count and the Gmail link.
@@ -236,7 +255,7 @@ links keep only `http(s)` and `mailto` addresses, hidden text (preheaders) is dr
 history (Gmail, Outlook, Apple Mail, Yahoo, Proton, `>` lines) folds into a "Quoted text" section.
 A mail with only a text part shows as paragraphs with its links.
 
-**The sender's footer** (0.6.0) folds into a closed "Sender's footer" section: the unsubscribe
+**The sender's footer** (0.6.0, Reader only: the Original view shows the mail whole) folds into a closed "Sender's footer" section: the unsubscribe
 links, the privacy policy, "you are receiving this because", the app-store badges. Conservatively:
 only at the end of the mail, only when it has a link, with at least a line of real text before it,
 nothing long after it, no quoted history after it, and never through the middle of a data table, a

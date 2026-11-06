@@ -172,6 +172,36 @@ Header: title bar meta (last poll · address) and ↻. Not signed in: the panel 
 - `aside`: from, to, cc, date, labels, the thread's message count, the Gmail link.
 - Discuss / New session send a prompt `About the mail "<subject>" from <sender>` + readable text.
 
+## Original view (0.6.0)
+
+The mail as its sender designed it, beside the Reader layout above (the reviewer's feature
+`original`, cc-cockpit 0.13.0). Code: `sanitize.js` `sanitizeOriginal`, `css.js`, `views.js`,
+`document.js` (`messageCard`'s `original`, `threadDocument`'s markers), the host's `originalsOf`,
+`onReviewerView`. Decisions:
+
+- **Two walls**: our original-mode sanitizer, then the reviewer's frame (`sandbox=""`: no script,
+  no same-origin, no forms, popups or top navigation; its own CSP `default-src 'none'; style-src
+  'unsafe-inline'; img-src data:; font-src data:; form-action 'none'; base-uri 'none'`). Either
+  alone holds; the sanitizer exists so a hole in one is not a hole.
+- **Sanitizer, original mode**: drops script, iframe, object, embed, form controls, meta, link,
+  base, every `on*` attribute, `javascript:`/`data:` URLs (but data images); keeps layout tables,
+  presentational attributes, `style` attributes and `<style>` blocks (collected by `parse(html,
+  {styles:true})`). CSS (`css.js`): only `@media`/`@supports` at-rules, no `url()` or other
+  URL-taking function but a data image, no `@import`, `expression`, `behavior`, `-moz-binding`,
+  `position: fixed|sticky`, no backslash or `<` anywhere; checked again on the text written out.
+  Past 200,000 characters of `<style>` text, `sanitizeOriginal` returns null and the mail is Reader
+  only. No footer, quote or hidden-text folding: the original is the original.
+- **Pictures**: the same 0.6.0 loader; `cid:` and remote pictures become reviewer assets (the frame
+  gets them as data: URLs), a remote one still only as "Remote images" allows.
+- **Transport**: annotate `originals: [{id: 'm1'…, html}]` and `view`. A card carries
+  `data-reader`/`data-original` only when its original fits (at most 50, 2,000,000 bytes in all,
+  oldest first to go), so a message over the budget stays Reader with no switch.
+- **Memory**: the reviewer's service event `view {key, view, caller}` (ours only) stores the choice
+  for the thread's latest sender in appStorage `viewBySender`, `[[address, view]]` pairs, the newest
+  last, at most 500. The app setting `defaultView` (Original) covers a sender with no choice.
+- **Fallback**: Reader when the mail has no HTML part, its CSS is over the cap, the budget is spent,
+  or the reviewer has no `original` feature (asked once per open, as `mail`).
+
 ## Remote images (0.6.0)
 
 Code: `lib/remote.js` (fetch, address rules, loader, policy), `sanitize.js` (placeholders), the
