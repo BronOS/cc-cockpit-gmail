@@ -191,8 +191,10 @@ test('image proxy: {url} encoded, the proxy host exempt, the target checked with
   assert.equal(s.proxyBroken, true)
   assert.equal(s.proxy, null)
   assert.match(s.problems[0], /^imageProxy: .*remote pictures are not loaded until it is fixed/)
-  assert.deepEqual(readAppSettings({}), { remoteImages: 'ask', proxy: null, proxyBroken: false, problems: [] })
+  assert.deepEqual(readAppSettings({}), { remoteImages: 'ask', proxy: null, proxyBroken: false, problems: [], defaultView: 'original' })
   assert.equal(readAppSettings({ remoteImages: 'weird' }).remoteImages, 'ask')
+  assert.equal(readAppSettings({ defaultView: 'reader' }).defaultView, 'reader')
+  assert.equal(readAppSettings({ defaultView: 'raw' }).defaultView, 'original')
 })
 
 test('showRemote: Ask waits for the person; Always, a listed sender or Show images on this mail load', () => {

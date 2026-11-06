@@ -31,6 +31,16 @@
             ],
             "default": "ask"
           },
+          "defaultView": {
+            "type": "string",
+            "title": "Mail opens in",
+            "description": "With cc-cockpit 0.13.0+. Original: the mail as its sender made it (its layout, colours and styles), in a frame that runs no script and loads nothing from the web. Reader: a clean reading layout, where notes go on the text. Each mail has an Original | Reader switch; your last choice for a sender is remembered and wins over this. A mail with no HTML, or one too large to show as made, opens in Reader.",
+            "oneOf": [
+              { "const": "original", "title": "Original (default)" },
+              { "const": "reader", "title": "Reader" }
+            ],
+            "default": "original"
+          },
           "imageProxy": {
             "type": "string",
             "title": "Image proxy URL template",

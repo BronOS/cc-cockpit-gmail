@@ -22,7 +22,7 @@
 // the one before 0.6.0 (cards), for an older reviewer and the plugin's own reader page.
 
 const { esc } = require('./entities')
-const { sanitizeHtml, textToHtml, htmlToText } = require('./sanitize')
+const { sanitizeHtml, sanitizeOriginal, textToHtml, htmlToText } = require('./sanitize')
 const { walkMessage } = require('./mime')
 const { compactMessage, parseAddressList, displayName } = require('./model')
 const { partKey } = require('./images')
@@ -33,6 +33,10 @@ const ACTION_SHOW = 'show-images'
 const ACTION_ALWAYS = 'always-sender'
 
 const HTML_MAX_BYTES = 2000000 // below the reviewer's 2 MiB (2,097,152), counted in UTF-8 bytes
+// The originals (o.original, the reviewer's Original view): their own budget of the same size (the
+// reviewer counts them apart from the html), at most MAX_ORIGINALS (its cap), the newest messages first.
+const ORIGINALS_MAX_BYTES = 2000000
+const MAX_ORIGINALS = 50
 const BODY_MAX_BYTES = 1000000
 const ASIDE_MAX = 90000 // below the reviewer's 100,000 characters
 
@@ -84,11 +88,14 @@ function labelNames(ids, names = {}) {
  * @param {string} [o.related] the related item's card (jira.js relatedCard), under the subject
  * @param {number} [o.now] the clock, for "Today 09:09"
  * @param {object} [o.built] buildCards' answer for these options, when the host already built it
- * @returns {{ html: string, aside?: string, omitted: number, remoteImages: number, remote: object[] }}
+ * @param {boolean} [o.original] with o.mail: each message's original (the reviewer's Original view,
+ *   feature 'original') in `originals`, and the markers that place it (`data-reader`, `data-original`)
+ * @returns {{ html: string, aside?: string, omitted: number, remoteImages: number, remote: object[], originals: { id: string, html: string }[] }}
  */
 function threadDocument(o) {
   const built = o.built || buildCards(o)
   const { facts, cards } = built
+  const origs = built.originals || cards.map(() => null)
   const loaded = o.remote && typeof o.remote.loaded === 'function' ? o.remote.loaded : () => false
   // Not shown: each remote picture once, the ones the host did not load. A minor one (a logo, an
   // avatar, a tiny spacer) is not counted: it is hidden either way, and a bar for a lone logo is noise.
@@ -105,17 +112,29 @@ function threadDocument(o) {
   const fixed = bytes(parts.join('\n')) + bytes(tail) + 2000
   let room = HTML_MAX_BYTES - fixed
   const kept = []
+  // The originals of the messages shown, newest first, within their own budget; a message whose
+  // original does not fit has no marker for it (its Reader rendering shows in both views).
+  const originals = []
+  let originalRoom = ORIGINALS_MAX_BYTES
   for (let i = cards.length - 1; i >= 0; i--) {
     const b = bytes(cards[i]) + 1
     if (b > room) break
     room -= b
-    kept.unshift(cards[i])
+    const og = o.original ? origs[i] : null
+    const ob = og ? bytes(og.html) : 0
+    if (og && ob <= originalRoom && originals.length < MAX_ORIGINALS) {
+      originalRoom -= ob
+      originals.unshift({ id: og.id, html: og.html })
+      kept.unshift(cards[i].replace(og.marker.reader, og.marker.readerWith).replace(og.marker.slot, og.marker.slotWith))
+    } else {
+      kept.unshift(og ? cards[i].replace(og.marker.slot, '') : cards[i])
+    }
   }
   const omitted = cards.length - kept.length
   if (omitted) parts.push(`<p><em>${omitted} earlier message${omitted === 1 ? ' is' : 's are'} not shown here (too long together); Gmail has ${omitted === 1 ? 'it' : 'them'}.</em></p>`)
   parts.push(...kept)
   if (tail) parts.push(tail)
-  const out = { html: parts.join('\n'), omitted, remoteImages, remote: built.remote }
+  const out = { html: parts.join('\n'), omitted, remoteImages, remote: built.remote, originals }
   if (o.aside) {
     out.aside = threadDetails(facts, o.url, o.labels)
     if (o.asideTail && out.aside.length + o.asideTail.length <= ASIDE_MAX) out.aside += o.asideTail
@@ -134,13 +153,15 @@ function buildCards(o) {
   const facts = msgs.map(compactMessage)
   let remoteImages = 0
   const remote = new Map()
+  const originals = []
   const cards = msgs.map((raw, i) => {
-    const r = messageCard(raw, facts[i], assets, o.bodies, { mail: Boolean(o.mail), remote: o.remote, now: o.now })
+    const r = messageCard(raw, facts[i], assets, o.bodies, { mail: Boolean(o.mail), remote: o.remote, now: o.now, original: o.mail && o.original ? `m${i + 1}` : null })
     remoteImages += r.remoteImages
     for (const x of r.remote) if (!remote.has(x.id)) remote.set(x.id, { ...x, messageId: String(raw.id), address: facts[i].address })
+    originals.push(r.original || null)
     return r.html
   })
-  return { facts, cards, remote: [...remote.values()], remoteImages }
+  return { facts, cards, remote: [...remote.values()], remoteImages, originals }
 }
 
 /**
@@ -223,6 +244,26 @@ function messageCard(raw, m, assets, bodies, x = {}) {
   }
   if (!body.trim()) body = m.snippet ? `<p>${esc(m.snippet)}</p>` : '<p><em>(no text)</em></p>'
 
+  // The original (x.original: its id, the reviewer's Original view): the mail's own HTML and CSS,
+  // in the original mode (sanitize.js sanitizeOriginal). None without an HTML part, with CSS over the
+  // cap, or over BODY_MAX_BYTES: the Reader rendering then stands for it in both views. Its remote
+  // pictures join the list (the same ids as the Reader's, so one load fills both).
+  let original = null
+  if (x.mail && x.original && html) {
+    const og = sanitizeOriginal(html, { cid: (k) => cidAsset.get(k) || null })
+    if (og && og.html.trim() && bytes(og.html) <= BODY_MAX_BYTES) {
+      const seen = new Set(remote.map((r) => r.id))
+      for (const r of og.remote) if (!seen.has(r.id)) remote.push(r)
+      const id = x.original
+      // The markers go in by threadDocument, once it knows the original fits its budget.
+      original = {
+        id,
+        html: og.html,
+        marker: { reader: '<div class="mail-body">', readerWith: `<div class="mail-body" data-reader="${id}">`, slot: '<!--original-->', slotWith: `<div data-original="${id}"></div>` },
+      }
+    }
+  }
+
   if (x.mail) {
     const files = attachmentsHtml(raw, w, used, assets)
     const name = m.from || m.address || 'unknown'
@@ -230,7 +271,7 @@ function messageCard(raw, m, assets, bodies, x = {}) {
     const to = [m.to ? `to ${names(m.to)}` : '', m.cc ? `cc ${names(m.cc)}` : ''].filter(Boolean).join(' · ')
     const time = `<div class="mail-when">${esc(when(m.at, x.now))}${m.unread ? '<br><span class="mail-chip">Unread</span>' : ''}</div>`
     const head = `<div class="mail-head"><div class="mail-avatar">${esc(initials(m.from, m.address))}</div><div class="mail-who">${from}${to ? `<div class="mail-to">${to}</div>` : ''}</div>${time}</div>`
-    return { html: `<div class="mail-msg">${head}\n<div class="mail-body">${body}</div>${files ? `\n${files}` : ''}</div>`, remoteImages, remote }
+    return { html: `<div class="mail-msg">${head}\n<div class="mail-body">${body}</div>${original ? '<!--original-->' : ''}${files ? `\n${files}` : ''}</div>`, remoteImages, remote, original }
   }
 
   const who = `<strong>${esc(m.from || m.address || 'unknown')}</strong>${m.address && m.address !== m.from ? ` <span class="muted">&lt;${esc(m.address)}&gt;</span>` : ''}`

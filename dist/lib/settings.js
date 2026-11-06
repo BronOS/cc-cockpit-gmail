@@ -83,7 +83,9 @@ function readAppSettings(a) {
   let proxy = null
   if (parsed && parsed.error) problems.push(`imageProxy: ${parsed.error}; remote pictures are not loaded until it is fixed`)
   else proxy = parsed
-  return { remoteImages: s.remoteImages === 'always' ? 'always' : 'ask', proxy, proxyBroken: Boolean(parsed && parsed.error), problems }
+  // The reviewer's view a mail opens in when its sender has no choice of the person's yet (views.js).
+  const defaultView = s.defaultView === 'reader' ? 'reader' : 'original'
+  return { remoteImages: s.remoteImages === 'always' ? 'always' : 'ask', proxy, proxyBroken: Boolean(parsed && parsed.error), problems, defaultView }
 }
 
 /** Whether the Alerts lane exists: switched on and at least one alert sender. */

@@ -277,8 +277,11 @@ function el(name, attrs, parent) {
  * `{ text }` (decoded). Dropped elements never enter it. Implicit closes as HTML does them for the
  * cases mail relies on (an unclosed <p>, <li>, <td>, <tr>, a link inside a link).
  */
-function parse(html) {
+function parse(html, o = {}) {
   let s = String(html == null ? '' : html)
+  // The original mode (sanitizeOriginal) keeps the mail's <style> text, wherever it is (most mail
+  // CSS is in the head, which is dropped here): collected apart, in document order, cleaned there.
+  const styles = o.styles ? [] : null
   let truncated = false
   if (s.length > MAX_INPUT) {
     s = s.slice(0, MAX_INPUT)
@@ -302,6 +305,7 @@ function parse(html) {
     if (k > 0) stack.length = k
   }
   for (const t of tokenize(s)) {
+    if (styles && t.type === 'raw' && t.name === 'style') styles.push(t.text)
     if (skip) {
       // A <head> left open ends where the body starts, as browsers end it: at <body> or at the first
       // tag that cannot be in a head. Without this, a mail with an unclosed head would show nothing.
@@ -385,7 +389,7 @@ function parse(html) {
     if (!VOID.has(name) && !t.selfClosing && stack.length < MAX_DEPTH) stack.push(node)
     else if (!VOID.has(name) && !t.selfClosing) node.flattened = true
   }
-  return { root, truncated }
+  return { root, truncated, styles }
 }
 
 // ---- output ----
@@ -894,6 +898,143 @@ function cidKey(raw) {
   return s && s.length <= 500 ? s : null
 }
 
+// ---- the original mode (0.6.0: the reviewer's Original view) ----
+//
+// The mail as its sender laid it out, for the reviewer's Original view (feature 'original'), which
+// shows it in a frame that runs no script and loads nothing from the network (no allow-scripts, no
+// allow-same-origin, its own CSP: images from data: only). This is the second wall, so the frame's
+// rules are not the only thing between a hostile mail and the person:
+//
+// - kept: layout tables and their presentational attributes (width, bgcolor, cellpadding, align...),
+//   `style` attributes and `<style>` blocks cleaned by css.js (no url() but data: images, no
+//   @import, expression, behavior, -moz-binding, position fixed or sticky; a message's style text is
+//   capped, and past the cap there is no original: the Reader view instead), `class` and `id` (the
+//   mail's selectors name them), the usual inline elements (b, i, font, center...), and `<body>` as a
+//   `<div>` with its own attributes (its background colour).
+// - dropped: script, style elements outside the cleaned blocks, iframe, object, embed, forms'
+//   controls (a form itself is unwrapped), meta (refresh), link, base, svg, math, media; every
+//   attribute not on the list (event handlers, src, srcset, background, action, formaction, ping,
+//   target...); an href that is not http(s) or mailto (javascript:, data:, relative).
+// - pictures: the same as the Reader view's placeholders, so one loader fills both: a `cid:` part as
+//   its asset, a remote one as `data-asset="r…"` (its declared size kept, so the layout holds while it
+//   is not loaded; a logo or avatar with `data-minor`), a 1x1 tracking pixel dropped, a data: image
+//   (png, jpeg, gif, webp) kept as it is; anything else is its alt text only.
+// - not done: footer folding, quote folding and dropping hidden content. The sender's layout stays
+//   as it is; its own CSS hides what it hides. Headings keep their levels.
+
+const { sanitizeStylesheet, sanitizeStyle, MAX_CSS } = require('./css')
+
+const ORIGINAL_KEEP = new Set([
+  'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'br', 'hr', 'ul', 'ol', 'li', 'pre', 'code', 'blockquote', 'div', 'span',
+  'table', 'thead', 'tbody', 'tfoot', 'tr', 'th', 'td', 'caption', 'colgroup', 'col', 'a', 'img', 'strong', 'em', 'b',
+  'i', 'u', 's', 'strike', 'del', 'ins', 'sub', 'sup', 'small', 'big', 'font', 'center', 'mark', 'abbr', 'cite', 'q',
+  'dfn', 'kbd', 'samp', 'var', 'tt', 'wbr', 'section', 'article', 'header', 'footer', 'main', 'nav', 'aside', 'address',
+  'figure', 'figcaption', 'details', 'summary', 'dl', 'dt', 'dd', 'bdi', 'bdo', 'time', 'hgroup', 'label', 'fieldset',
+  'legend',
+])
+const ORIGINAL_VOID = new Set(['br', 'hr', 'img', 'col', 'wbr'])
+// Presentational only: none takes a URL, none runs anything.
+const ORIGINAL_ATTRS = new Set([
+  'class', 'id', 'title', 'dir', 'lang', 'align', 'valign', 'bgcolor', 'color', 'face', 'size', 'width', 'height', 'border',
+  'cellpadding', 'cellspacing', 'colspan', 'rowspan', 'nowrap', 'alt', 'role', 'hidden', 'span', 'start', 'type',
+  'reversed', 'headers', 'scope', 'clear', 'hspace', 'vspace', 'open', 'datetime',
+])
+const MAX_ORIGINAL_ATTR = 1000
+const DATA_IMAGE = /^data:image\/(?:png|jpeg|gif|webp);base64,[A-Za-z0-9+/]+={0,2}$/
+const MAX_DATA_IMAGE = 1000000 // the reviewer's cap on one asset's data: URL
+
+/**
+ * A mail body in the original mode (see above): `{ html, usedCids, remote, truncated }`, or null when
+ * the mail cannot be shown as it was made (its CSS is over MAX_CSS): the Reader view then. `o.cid`
+ * as sanitizeHtml's; `remote`: each remote picture once ({ id, url, alt, minor }, the ids
+ * sanitizeHtml gives them, so an asset the host loads fills both views).
+ */
+function sanitizeOriginal(html, o = {}) {
+  const { root, truncated, styles } = parse(html, { styles: true })
+  let cssChars = 0
+  for (const t of styles) cssChars += t.length
+  if (cssChars > MAX_CSS) return null
+  const c = {
+    cid: typeof o.cid === 'function' ? o.cid : () => null,
+    usedCids: new Set(),
+    remote: new Map(),
+  }
+  const sheets = styles.map(sanitizeStylesheet).filter(Boolean)
+  let out = sheets.length ? `<style>${sheets.join('\n')}</style>` : ''
+  out += originalChildren(root, c, 0, false)
+  if (truncated) out += '<p><em>(This mail is too long to show in full here; Gmail has the rest.)</em></p>'
+  return { html: out, usedCids: c.usedCids, remote: [...c.remote.values()], truncated }
+}
+
+function originalChildren(node, c, depth, inLink) {
+  let s = ''
+  for (const n of node.children || []) s += originalOne(n, c, depth, inLink)
+  return s
+}
+
+function originalOne(n, c, depth, inLink) {
+  if (n.text !== undefined) return esc(n.text)
+  if (depth > MAX_DEPTH) return ''
+  let name = n.name
+  if (name === 'body') name = 'div' // its background and padding are the sender's page
+  if (name === 'img') return originalImage(n, c)
+  if (!ORIGINAL_KEEP.has(name)) return originalChildren(n, c, depth + 1, inLink) // html, form, o:p, unknown tags
+  let attrs = originalAttrs(n)
+  let link = inLink
+  if (name === 'a') {
+    const href = inLink ? null : safeHref(decode(n.attrs.get('href') || ''))
+    if (href) {
+      attrs += ` href="${esc(href)}"`
+      link = true
+    }
+  }
+  if (ORIGINAL_VOID.has(name)) return `<${name}${attrs}>`
+  return `<${name}${attrs}>${originalChildren(n, c, depth + 1, link)}</${name}>`
+}
+
+/** The kept attributes of an element, written out (style cleaned by css.js). */
+function originalAttrs(n) {
+  let s = ''
+  for (const [name, raw] of n.attrs) {
+    if (name === 'style') {
+      const css = sanitizeStyle(decode(raw))
+      if (css) s += ` style="${esc(css)}"`
+      continue
+    }
+    if (!ORIGINAL_ATTRS.has(name)) continue
+    const v = attrText(raw)
+    if (v.length > MAX_ORIGINAL_ATTR) continue
+    s += v === '' && (name === 'hidden' || name === 'nowrap' || name === 'reversed' || name === 'open') ? ` ${name}` : ` ${name}="${esc(v)}"`
+  }
+  return s
+}
+
+/** An <img> of the original: an asset (cid: or remote, a placeholder until loaded), a data: image, or its alt text. */
+function originalImage(n, c) {
+  const src = decode(n.attrs.get('src') || '').trim()
+  const attrs = originalAttrs(n)
+  if (/^cid:/i.test(src)) {
+    const key = cidKey(src.slice(4))
+    const asset = key ? c.cid(key) : null
+    if (asset && /^[A-Za-z0-9._-]{1,100}$/.test(asset)) {
+      c.usedCids.add(key)
+      return `<img data-asset="${esc(asset)}"${attrs}>`
+    }
+    return `<img${attrs}>`
+  }
+  if (DATA_IMAGE.test(src) && src.length <= MAX_DATA_IMAGE) return `<img src="${src}"${attrs}>`
+  const href = safeHref(src)
+  if (href && !href.startsWith('mailto:')) {
+    if (isPixel(n)) return ''
+    const alt = attrText(n.attrs.get('alt') || n.attrs.get('title') || '').replace(/\s+/g, ' ').trim().slice(0, MAX_TITLE)
+    const minor = isMinor(n, href, alt)
+    const id = remoteAssetId(href)
+    if (!c.remote.has(id) && c.remote.size < MAX_REMOTE) c.remote.set(id, { id, url: href, alt, minor })
+    return `<img data-asset="${esc(id)}"${minor ? ' data-minor' : ''}${attrs}>`
+  }
+  return `<img${attrs}>`
+}
+
 // ---- plain text ----
 
 const BLOCK = new Set(['p', 'div', 'br', 'tr', 'li', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'blockquote', 'table', 'hr', 'pre', 'ul', 'ol', 'dl', 'dt', 'dd', 'section', 'article', 'header', 'footer', 'center', 'address', 'figure', 'figcaption', 'details', 'summary'])
@@ -1006,4 +1147,4 @@ function textToHtml(text) {
   return paragraphs(body) + (inner ? `\n${fold(inner)}` : '')
 }
 
-module.exports = { tokenize, parse, sanitizeHtml, htmlToText, textToHtml, linkify, safeHref, cidKey, isLayoutTable, remoteAssetId, attrText, isMinor, ALLOWED, RENAME, DROP, MAX_INPUT, MAX_DEPTH, FOOTER_SIGNAL }
+module.exports = { tokenize, parse, sanitizeHtml, sanitizeOriginal, htmlToText, textToHtml, linkify, safeHref, cidKey, isLayoutTable, remoteAssetId, attrText, isMinor, ALLOWED, RENAME, DROP, MAX_INPUT, MAX_DEPTH, FOOTER_SIGNAL }

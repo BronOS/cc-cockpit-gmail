@@ -46,6 +46,7 @@ const { hashOf, sha, oneLine, cut, rowId, mapLimit, gmailId, emailAddress, ALERT
 const { esc } = require('./lib/entities')
 const J = require('./lib/jira')
 const { MAX_TOTAL_CHARS } = require('./lib/images')
+const V = require('./lib/views')
 
 const PANEL = 'main'
 const SOURCE = 'gmail' // the triage source name: verdicts, overrides and cases group by it
@@ -153,6 +154,10 @@ function start(ctx, io = {}) {
     senders: [],
     shownKeys: new Set(),
     views: new Map(),
+    // The Original | Reader view (0.6.0, the reviewer's 'original'): the reviewer key of each mail
+    // opened with originals -> its sender's address, so the `view` event's switch is remembered for
+    // that sender (the newest VIEWS_KEPT).
+    viewSenders: new Map(),
     stopped: false,
   }
   const cfg = () => S.settings.cfg
@@ -511,6 +516,8 @@ function start(ctx, io = {}) {
 
   // A click on our document's buttons in the reviewer (0.13.0): see onReviewerAction.
   if (typeof reviewer.on === 'function') reviewer.on('action', (d) => void onReviewerAction(d).catch((e) => ctx.log.warn(`reviewer action: ${e && e.message ? e.message : e}`)))
+  // The Original | Reader switch on our mail (0.6.0): remembered per sender (onReviewerView).
+  if (typeof reviewer.on === 'function') reviewer.on('view', (d) => void onReviewerView(d).catch((e) => ctx.log.warn(`reviewer view: ${e && e.message ? e.message : e}`)))
 
   // ---- settings ----
 
@@ -761,7 +768,7 @@ function start(ctx, io = {}) {
       count: Math.max(0, MAX_ASSETS - wanted.length - (jx ? JIRA_DOC.maxImages : 0)),
       chars: Math.max(0, MAX_TOTAL_CHARS - wanted.reduce((n, i) => n + dataUrlLength(i.size === null || i.size === undefined ? MAX_IMAGE_BYTES : i.size, i.mime), 0) - (jx ? JIRA_DOC.maxImageChars : 0)),
     }
-    const remoteLoad = startRemote(t, mail, room)
+    const remoteLoad = startRemote(t, mail, room, mail && Boolean(mode.original))
     let assets = []
     let byKey = new Map()
     if (wanted.length) {
@@ -807,7 +814,7 @@ function start(ctx, io = {}) {
       // Jira call of ours (the reviewer opens links in the browser).
       if (mail) related = J.relatedCard({ key: jx.key, url: r.url, issue: r.issue, change: jx.change, subject: t.title, esc })
     }
-    const opts = { title: t.title, messages: t.messages, assets: byKey, bodies: t.bodies, url: t.url, labels: await labelNames(t.messages), note: t.note, mail, now: now(), remote: { loaded: (id) => loadedIds.has(id) } }
+    const opts = { title: t.title, messages: t.messages, assets: byKey, bodies: t.bodies, url: t.url, labels: await labelNames(t.messages), note: t.note, mail, original: mail && Boolean(mode.original), now: now(), remote: { loaded: (id) => loadedIds.has(id) } }
     const built = buildCards(opts)
     const rest = byWeight(built.remote.filter((r) => !loadedIds.has(r.id)))
     // The bar's Always show names the newest sender whose pictures wait (buildCards lists oldest first).
@@ -818,7 +825,7 @@ function start(ctx, io = {}) {
     const doc = threadDocument({ ...opts, built, aside, tail, asideTail, related, images: { actions: Boolean(mode.actions), address } })
     const all = [...assets, ...jiraAssets, ...(companion && Array.isArray(companion.assets) ? companion.assets : [])]
     const left = { count: Math.max(0, MAX_ASSETS - all.length), chars: Math.max(0, MAX_TOTAL_CHARS - all.reduce((n, a) => n + a.dataUrl.length, 0)) }
-    return { html: doc.html, assets: [...assets, ...jiraAssets], aside: doc.aside, companion, remote: { rest, room: left, address } }
+    return { html: doc.html, assets: [...assets, ...jiraAssets], aside: doc.aside, companion, remote: { rest, room: left, address }, originals: doc.originals || [] }
   }
 
   // ---- remote pictures (0.6.0; lib/remote.js has the fetch and its address rules) ----
@@ -832,14 +839,14 @@ function start(ctx, io = {}) {
    * The remote pictures of `t` that may load as it opens, loading within `room`; null when none may
    * (the usual case under Ask: then the thread is not read an extra time for their addresses).
    */
-  function startRemote(t, mail, room) {
+  function startRemote(t, mail, room, original = false) {
     if (S.app.proxyBroken || room.count < 1 || room.chars < 1024) return null
     const shown = S.shownKeys.has(t.key)
     const allow = (address) => R.showRemote({ mode: S.app.remoteImages, senders: S.senders, address, shown })
     if (!t.messages.some((m) => allow(compactMessage(m).address))) return null
     // Their addresses: the thread built once without its own pictures (those do not change which remote
     // ones there are); threadView builds it again with everything once they are in.
-    const refs = buildCards({ messages: t.messages, bodies: t.bodies, mail }).remote.filter((r) => allow(r.address))
+    const refs = buildCards({ messages: t.messages, bodies: t.bodies, mail, original }).remote.filter((r) => allow(r.address))
     return refs.length ? loadPictures(byWeight(refs), room) : null
   }
 
@@ -896,6 +903,48 @@ function start(ctx, io = {}) {
     if (!remote || !remote.rest.length) return
     S.views.set(key, { rest: remote.rest, room: remote.room, address: remote.address, loading: null })
     while (S.views.size > VIEWS_KEPT) S.views.delete(S.views.keys().next().value)
+  }
+
+  // ---- the Original | Reader view (0.6.0; lib/views.js) ----
+
+  /** The address of the thread's newest message's sender (lower case), or ''. */
+  function threadSender(t) {
+    const msgs = Array.isArray(t.messages) ? [...t.messages].sort((a, b) => Number(a.internalDate || 0) - Number(b.internalDate || 0)) : []
+    const last = msgs[msgs.length - 1]
+    return last ? emailAddress(compactMessage(last).address || '') || '' : ''
+  }
+
+  function rememberSender(key, address) {
+    S.viewSenders.delete(key)
+    S.viewSenders.set(key, address)
+    while (S.viewSenders.size > VIEWS_KEPT) S.viewSenders.delete(S.viewSenders.keys().next().value)
+  }
+
+  /** The per-sender choices from ctx.appStorage ([] when unreadable: the setting decides then). */
+  async function loadViews() {
+    const store = appStore()
+    if (!store) return []
+    try {
+      return V.cleanViews(await store.get(V.VIEWS_KEY))
+    } catch (e) {
+      ctx.log.warn(`reading the view choices failed: ${e.message}`)
+      return []
+    }
+  }
+
+  /**
+   * The reviewer's `view` event: the person switched a mail of ours between Original and Reader. Kept
+   * for its sender (read, changed, written: another window may write between, and a lost click is
+   * harmless). `caller` names whose document it was (set by the reviewer), as for actions.
+   */
+  async function onReviewerView(d) {
+    if (!d || typeof d !== 'object' || d.caller !== ctx.pluginId || typeof d.key !== 'string' || !V.VIEWS.includes(d.view)) return
+    const address = S.viewSenders.get(d.key)
+    const store = appStore()
+    if (!address || !store) return
+    const before = V.cleanViews(await store.get(V.VIEWS_KEY))
+    const next = V.chooseView(before, address, d.view)
+    if (next !== before) await store.set(V.VIEWS_KEY, next)
   }
 
   /**
@@ -1139,7 +1188,12 @@ function start(ctx, io = {}) {
     const features = annotateOn() && !S.htmlRejected ? await reviewerFeatures() : []
     const beside = jiraOn() && !t.alert && features.includes('companion')
     // The mail layout; its images bar gets buttons only when a click can come back and be answered.
-    const mode = { mail: features.includes('mail'), actions: features.includes('mail') && features.includes('actions') && features.includes('update') }
+    const mode = {
+      mail: features.includes('mail'),
+      actions: features.includes('mail') && features.includes('actions') && features.includes('update'),
+      // The Original view: each message's own HTML and CSS beside the Reader rendering (0.6.0).
+      original: features.includes('mail') && features.includes('original'),
+    }
     await loadSenders()
     const jx = await jiraThread(t, { companion: beside }).catch((e) => {
       ctx.log.warn(`jira: ${e && e.message ? e.message : e}`)
@@ -1151,11 +1205,19 @@ function start(ctx, io = {}) {
     // `start`, app 0.9.4; an older reviewer ignores the field).
     const startAt = Array.isArray(t.messages) && t.messages.length > 1 ? { start: 'end' } : {}
     const view = async (aside = false, withCompanion = false, m = mode) => {
-      const k = `${aside}:${withCompanion}:${Boolean(m.mail)}`
+      const k = `${aside}:${withCompanion}:${Boolean(m.mail)}:${Boolean(m.original)}`
       return (docs[k] = docs[k] || (await threadView(t, aside, jx, withCompanion, m)))
     }
     // The mail layout as annotate's `kind` (an older reviewer has no 'mail' and gets the cards).
     const kind = mode.mail ? { kind: 'mail' } : {}
+    // The originals and the view they open in: the person's last choice for the sender, else the
+    // setting. None (no HTML part, too large): no originals, and the reviewer shows Reader alone.
+    const sender = threadSender(t)
+    const originalsOf = async (v) => {
+      if (!mode.original || !v.originals || !v.originals.length) return {}
+      if (sender) rememberSender(t.key, sender)
+      return { originals: v.originals, view: V.viewFor(await loadViews(), sender, S.app.defaultView) }
+    }
     // Kept before the annotate, not after: a click on Show images can come before annotate answers.
     const remember = (v) => {
       if (mode.actions) rememberView(t.key, v.remote)
@@ -1177,7 +1239,7 @@ function start(ctx, io = {}) {
           try {
             // The mail's column header: "Mail" and "Open in Gmail ↗" (the issue's says Jira).
             remember(v)
-            const r = await reviewer.annotate({ ...base, ...startAt, ...kind, label: 'Mail', urlLabel: 'Gmail', html: v.html, ...(v.aside ? { aside: v.aside } : {}), ...(v.assets.length ? { assets: v.assets } : {}), companion: v.companion })
+            const r = await reviewer.annotate({ ...base, ...startAt, ...kind, label: 'Mail', urlLabel: 'Gmail', html: v.html, ...(await originalsOf(v)), ...(v.aside ? { aside: v.aside } : {}), ...(v.assets.length ? { assets: v.assets } : {}), companion: v.companion })
             if (opened(r)) seen()
             return
           } catch (e) {
@@ -1190,7 +1252,7 @@ function start(ctx, io = {}) {
         const v = await view(true)
         try {
           remember(v)
-          const r = await reviewer.annotate({ ...base, ...startAt, ...kind, html: v.html, ...(v.aside ? { aside: v.aside } : {}), ...(v.assets.length ? { assets: v.assets } : {}) })
+          const r = await reviewer.annotate({ ...base, ...startAt, ...kind, html: v.html, ...(await originalsOf(v)), ...(v.aside ? { aside: v.aside } : {}), ...(v.assets.length ? { assets: v.assets } : {}) })
           if (opened(r)) seen()
           return
         } catch (e) {
