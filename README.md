@@ -224,6 +224,11 @@ prompt shows when Google refuses the first change for the scope (the Gmail box w
 
 Opening a thread reads it fresh from Gmail (`format=full`) and shows every message oldest first.
 
+When that read fails (no network, a Gmail error), the reviewer's overlay stays open with the error
+and a **Try again** button, which reads the thread again in the same overlay (0.6.1; it needs
+cc-cockpit 0.13.2 or later; an older app closes the overlay as before and the error shows in the
+panel). A mail that was never shown is not marked read.
+
 With cc-cockpit 0.13.0 or later (the reviewer's mail layout): the subject first, then each message
 under a header of its own: the sender's initials, the name and address, "to …" (and "cc …") on the
 next line, and the time on the right ("Today 09:09") with an Unread chip under it. The text sits in

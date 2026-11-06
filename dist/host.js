@@ -957,6 +957,8 @@ function start(ctx, io = {}) {
    */
   async function onReviewerAction(d) {
     if (!d || typeof d !== 'object' || d.caller !== ctx.pluginId || typeof d.key !== 'string') return
+    // Try again on the error page of a failed read (failView).
+    if (d.id === 'retry') return retryOpen(d.key)
     if (d.id !== ACTION_SHOW && d.id !== ACTION_ALWAYS) return
     const v = S.views.get(d.key)
     if (!v) return reviewerUpdate({ key: d.key, status: 'Open this mail again to show its images.' })
@@ -1025,8 +1027,9 @@ function start(ctx, io = {}) {
    * panel asks to sign in again instead).
    * The reviewer's overlay is up before the thread is read (its prepare, where it has one): reading a
    * thread with its pictures and its Jira issue takes seconds, with nothing on screen meanwhile
-   * (real-work feedback 8). The annotate below fills that overlay; whatever else happens (a failed
-   * read, our own reader page) closes it in the finally.
+   * (real-work feedback 8). The annotate below fills that overlay; a failed read turns it into the
+   * error page with Try again where the reviewer has `fail` (failView); whatever else happens (an
+   * older reviewer's failed read, our own reader page) closes it in the finally.
    * `onStarted` (feed act) runs only once something is on screen: the prepared overlay, our reader
    * page, or (neither: a reviewer without prepare, a prepare that failed or ran past its wait) the
    * filled view at the end. Called earlier, a failed read reached only this panel's notice while
@@ -1046,8 +1049,56 @@ function start(ctx, io = {}) {
     try {
       await showThread(id, pre, early, shown)
     } finally {
-      if (pre) await cancelView(pre)
+      // A loader turned into the read's error page (failView) stays: it is the person's to close.
+      if (pre && !pre.failed) await cancelView(pre)
       if (early && !early.used) closeQuietly(early.handle)
+    }
+  }
+
+  // Threads whose reviewer loader shows a failed read with Try again (failView): key -> row id.
+  const failedViews = new Map()
+
+  /**
+   * A read that failed after the reviewer's loader was up: the loader shows the error with Try again
+   * (the reviewer's `fail`, cc-cockpit 0.13.2) instead of closing. Cancelling it, as before, made a
+   * network outage flash the overlay open and shut with no reason on screen: the error reached only
+   * this panel's notice, which a click in Inbox never shows. The act contract stays: the loader was on
+   * screen, so the feed's act answered ok at prepare; nothing is marked read (seen() never ran).
+   * True when the reviewer took it; false (an older reviewer without 'fail', the person closed the
+   * loader meanwhile) leaves the cancel to openThread's finally, as before.
+   */
+  async function failView(pre, id, e) {
+    const msg = oneLine(e && e.message ? e.message : String(e))
+    const head = (e && (e.kind === 'network' || e.kind === 'timeout')) || /^cannot reach /i.test(msg) ? "Can't reach Gmail" : 'Could not load this mail'
+    try {
+      if (!(await reviewerFeatures()).includes('fail')) return false
+      // Try again only when its click can reach us (the event `action`).
+      const retry = typeof reviewer.on === 'function'
+      const r = await within(reviewer.fail({ key: pre.key, message: cut(`${head}: ${msg}`, 300), retry }), FEATURES_WAIT_MS)
+      if (!(r && r.failed)) return false
+      if (retry) failedViews.set(pre.key, id)
+      return true
+    } catch (err) {
+      ctx.log.warn(`reviewer.fail: ${err && err.message ? err.message : err}`)
+      return false
+    }
+  }
+
+  /**
+   * Try again on an error page of ours (the reviewer's event `action` { key, id: 'retry' }, our caller
+   * checked by onReviewerAction): the normal open again, so the reviewer takes the page back to its
+   * loader (prepare), and the mail or the error once more fills it.
+   */
+  async function retryOpen(key) {
+    const id = failedViews.get(key)
+    if (id === undefined) return
+    failedViews.delete(key)
+    try {
+      await openThread(id)
+    } catch (e) {
+      // As a panel click's open: the log and the notice, beside the error page the retry put up again.
+      ctx.log.warn(`retry open: ${e && e.message ? e.message : e}`)
+      setNotice(e && e.message ? e.message : String(e), 'error')
     }
   }
 
@@ -1170,7 +1221,15 @@ function start(ctx, io = {}) {
   }
 
   async function showThread(id, pre, early, shown = () => {}) {
-    const t = await loadThread(id)
+    let t
+    try {
+      t = await loadThread(id)
+    } catch (e) {
+      // The loader shows the failure (and openThread leaves it); the error still goes on to the
+      // panel's notice and the log, as before.
+      if (pre) pre.failed = await failView(pre, id, e)
+      throw e
+    }
     // Marked read only once the mail is on screen (the same places shown() runs): marking it right
     // after the read left a mail read in Gmail whose open was then refused, or whose loader the person
     // closed (annotate's { opened: false }), so they never saw it (phase-1 review round 4).

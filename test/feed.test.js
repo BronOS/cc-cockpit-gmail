@@ -502,6 +502,63 @@ test('act open: a refused prepare is no open; the loader the person closed (anno
   await b.h.stop()
 })
 
+// A failed read used to cancel the reviewer's loader: a network outage made the overlay flash open
+// and shut with no reason. With the reviewer's fail (cc-cockpit 0.13.2) the loader shows the error with
+// Try again; the act contract is unchanged (the loader was on screen: ok at prepare), nothing is marked
+// read, and Try again opens the mail in the same overlay.
+test('act open: a read that fails after prepare leaves the error page; Try again opens the mail; nothing is marked read until then', async () => {
+  const order = []
+  const annotated = []
+  const reviewer = {
+    features: async () => ['prepare', 'fail'],
+    prepare: async (s) => (order.push(['prepare', s.key]), { opened: true }),
+    cancel: async (s) => (order.push(['cancel', s.key]), { closed: true }),
+    fail: async (s) => (order.push(['fail', s]), { failed: true }),
+    annotate: async (s) => (order.push(['annotate', s.key]), annotated.push(s.key), { opened: true }),
+  }
+  let down = false
+  const routes = (u) => {
+    if (down && u.pathname.includes(`/threads/${T.t2}`)) throw new TypeError('fetch failed')
+    return null
+  }
+  const b = await signedIn({ reviewer, gmail: { routes }, project: { markReadOnOpen: true } })
+  down = true
+  assert.deepEqual(await b.feed.act(T.t2, 'open'), { ok: true })
+  await until(() => order.length === 2)
+  await b.h.writesIdle()
+  const key = `gmail:${T.t2}`
+  assert.deepEqual(order, [['prepare', key], ['fail', { key, message: "Can't reach Gmail: cannot reach gmail.googleapis.com: fetch failed", retry: true }]])
+  assert.deepEqual(b.gmail.state.modifies, [], 'a mail never shown stays unread')
+  await until(() => b.h.S.notice && b.h.S.notice.kind === 'error')
+  // Try again: only our own caller and key count.
+  await b.ctx.serviceEvent('reviewer', 'action', { key, id: 'retry', caller: 'someone.else' })
+  await b.ctx.serviceEvent('reviewer', 'action', { key: 'gmail:other', id: 'retry', caller: 'bronos.gmail' })
+  assert.equal(order.length, 2)
+  down = false
+  await b.ctx.serviceEvent('reviewer', 'action', { key, id: 'retry', caller: 'bronos.gmail' })
+  await until(() => annotated.length === 1)
+  await until(() => b.gmail.state.modifies.length === 1)
+  assert.deepEqual(order.slice(2), [['prepare', key], ['annotate', key], ['cancel', key]])
+  assert.deepEqual(b.gmail.state.modifies.map((m) => m.id), [T.t2], 'shown now: marked read')
+  await b.h.stop()
+})
+
+test('act open: a reviewer without fail (an older app) cancels the loader on a failed read, as before', async () => {
+  const order = []
+  const reviewer = {
+    features: async () => ['prepare'],
+    prepare: async (s) => (order.push(['prepare', s.key]), { opened: true }),
+    cancel: async (s) => (order.push(['cancel', s.key]), { closed: true }),
+    annotate: async () => ({ opened: true }),
+  }
+  const b = await signedIn({ reviewer })
+  delete b.gmail.threads[T.t2]
+  await b.feed.act(T.t2, 'open')
+  await until(() => order.length === 2)
+  assert.deepEqual(order, [['prepare', `gmail:${T.t2}`], ['cancel', `gmail:${T.t2}`]])
+  await b.h.stop()
+})
+
 test('markReadOnOpen: our reader page closed before the mail reached it marks nothing read', async () => {
   const b = await signedIn({ reviewer: null, project: { markReadOnOpen: true } })
   // The fake page ends at once (dismissed): the person closed the loader while the mail was read.
