@@ -7,6 +7,7 @@
 
 const { emailAddress } = require('./util')
 const { checkClientId } = require('./oauth-client')
+const { parseProxy } = require('./remote')
 
 const LANE_IDS = ['unread', 'alerts', 'read']
 const LANE_DEFAULTS = { unread: true, alerts: true, read: true }
@@ -66,9 +67,28 @@ function readSettings(p) {
   return { cfg, problems }
 }
 
+/**
+ * The app-wide settings (0.6.0, Settings > Plugins > Gmail; the always-show senders are the html
+ * settings page's, kept in ctx.appStorage): Remote images 'ask' (default) or 'always', and the image
+ * proxy template (parsed: null when empty). A bad proxy is a problem and loads no picture at all: a
+ * person who set a proxy did not want the pictures fetched directly instead.
+ *
+ * @param {Record<string, unknown>} a ctx.settings.app
+ * @returns {{ remoteImages: 'ask' | 'always', proxy: { template: string, hostKey: string } | null, problems: string[] }}
+ */
+function readAppSettings(a) {
+  const s = a || {}
+  const problems = []
+  const parsed = parseProxy(typeof s.imageProxy === 'string' ? s.imageProxy : '')
+  let proxy = null
+  if (parsed && parsed.error) problems.push(`imageProxy: ${parsed.error}; remote pictures are not loaded until it is fixed`)
+  else proxy = parsed
+  return { remoteImages: s.remoteImages === 'always' ? 'always' : 'ask', proxy, proxyBroken: Boolean(parsed && parsed.error), problems }
+}
+
 /** Whether the Alerts lane exists: switched on and at least one alert sender. */
 function alertsOn(cfg) {
   return Boolean(cfg.lanes.alerts && cfg.alertSenders.length)
 }
 
-module.exports = { readSettings, alertsOn, LANE_IDS, LANE_DEFAULTS }
+module.exports = { readSettings, readAppSettings, alertsOn, LANE_IDS, LANE_DEFAULTS }
