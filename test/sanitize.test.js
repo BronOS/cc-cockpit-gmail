@@ -5,17 +5,21 @@
 // would check itself), and a seeded fuzz throws tag soup at it.
 const test = require('node:test')
 const assert = require('node:assert/strict')
-const { sanitizeHtml, htmlToText, textToHtml, linkify, safeHref, cidKey, tokenize, parse, isLayoutTable, ALLOWED, MAX_INPUT } = require('../dist/lib/sanitize')
+const { sanitizeHtml, htmlToText, textToHtml, linkify, safeHref, cidKey, tokenize, parse, isLayoutTable, remoteAssetId, attrText, isMinor, ALLOWED, MAX_INPUT } = require('../dist/lib/sanitize')
 
 const ATTRS = {
-  a: new Set(['href', 'title']),
-  img: new Set(['data-asset', 'alt', 'title']),
+  a: new Set(['href', 'title', 'class']),
+  img: new Set(['data-asset', 'alt', 'title', 'class']),
   td: new Set(['colspan', 'rowspan']),
   th: new Set(['colspan', 'rowspan']),
   div: new Set(['title']),
-  span: new Set(['title']),
+  span: new Set(['title', 'class']),
   p: new Set(['title']),
+  details: new Set(['class']),
 }
+// The classes the sanitizer itself writes (0.6.0): a remote picture's label, the mail layout's
+// placeholders, a call-to-action link and the folded footer. Any class from the mail is dropped.
+const CLASSES = { span: new Set(['muted']), img: new Set(['mail-remote', 'mail-minor']), a: new Set(['mail-cta']), details: new Set(['mail-footer']) }
 const VOIDS = new Set(['br', 'hr', 'img'])
 const TAG = /<(\/?)([a-z][a-z0-9]*)((?: [a-z-]+="[^"<>]*")*)>/g
 
@@ -34,6 +38,7 @@ function assertClean(html, label = '') {
       if (k === 'href') assert.ok(!/[\x00-\x20]/.test(v), `${label}: control or space in href`)
       if (k === 'colspan' || k === 'rowspan') assert.match(v, /^\d+$/)
       if (k === 'data-asset') assert.match(v, /^[A-Za-z0-9._-]{1,100}$/)
+      if (k === 'class') for (const c of v.split(' ')) assert.ok(CLASSES[name] && CLASSES[name].has(c), `${label}: class ${c} on <${name}>`)
     }
     if (!VOIDS.has(name)) stack.push(name)
     return ''
@@ -166,14 +171,16 @@ test('hidden content and spacers are left out', () => {
   assert.equal(clean('<div><span></span><p> </p></div><p>x</p>'), '<p>x</p>')
 })
 
-test('images: an inline part is an asset, a remote picture a link, a tracking pixel nothing', () => {
+test('images: an inline part is an asset, a remote picture its label (not a link), a tracking pixel nothing', () => {
   const cid = (k) => (k === 'logo@acme' ? 'img0123456789abcdef' : null)
   const r = sanitizeHtml('<img src="cid:Logo@Acme" alt="Acme"><img src="cid:other"> <img src="https://cdn.x.org/a.png" alt="Banner"><img src="https://t.x.org/o.gif" width="1" height="1"><img src="https://t.x.org/p.gif" style="width:1px;height:1px">', { cid })
   assertClean(r.html)
-  assert.equal(r.html, '<img data-asset="img0123456789abcdef" alt="Acme" title="Acme">[image] <a href="https://cdn.x.org/a.png">[image: Banner]</a>')
+  // Before 0.6.0 the label was a link to the picture: one click loaded it outside the plugin's rules.
+  assert.equal(r.html, '<img data-asset="img0123456789abcdef" alt="Acme" title="Acme">[image] <span class="muted">[image: Banner]</span>')
   assert.deepEqual([...r.usedCids], ['logo@acme'])
   assert.equal(r.remoteImages, 1)
-  assert.equal(clean('<a href="https://x.org"><img src="https://x.org/i.png" alt="Shop"></a>'), '<a href="https://x.org/">[image: Shop]</a>', 'no link in a link')
+  assert.deepEqual(r.remote, [{ id: remoteAssetId('https://cdn.x.org/a.png'), url: 'https://cdn.x.org/a.png', alt: 'Banner', minor: false }], 'the pixels are not even listed')
+  assert.equal(clean('<a href="https://x.org"><img src="https://x.org/i.png" alt="Shop"></a>'), '<a href="https://x.org/">[image: Shop]</a>', 'in a link its label is the link text')
   assert.equal(clean('<img src="data:image/png;base64,AAAA" alt="d">'), '[image: d]')
   assert.equal(clean('<img src="javascript:alert(1)">'), '')
   // A caller handing back a strange asset id does not get it into an attribute.
@@ -295,4 +302,82 @@ test('linkify makes only http(s) links and stops at trailing punctuation', () =>
   assert.equal(linkify('go to https://x.org/a.'), 'go to <a href="https://x.org/a">https://x.org/a</a>.')
   assert.equal(linkify('(https://x.org/a) and javascript:alert(1)'), '(<a href="https://x.org/a">https://x.org/a</a>) and javascript:alert(1)')
   assert.equal(linkify('https://u:p@x.org/a'), 'https://u:p@x.org/a')
+})
+
+// ---- the mail layout (0.6.0) ----
+
+const mail = (html, o = {}) => clean(html, { mail: true, remote: { mode: 'placeholder' }, ...o })
+
+test('mail layout: a remote picture is a placeholder the reviewer fills, named by its URL hash; never a link', () => {
+  const url = 'https://cdn.example.com/hero.png'
+  const r = sanitizeHtml(`<p>Hi</p><img src="${url}" alt="Spring sale" width="600" height="300"><img src="${url}" alt="again">`, { mail: true, remote: { mode: 'placeholder' } })
+  assertClean(r.html)
+  const id = remoteAssetId(url)
+  assert.match(id, /^r[0-9a-f]{20}$/)
+  assert.equal(r.html, `<p>Hi</p><img data-asset="${id}" alt="Spring sale" title="Spring sale" class="mail-remote"><img data-asset="${id}" alt="again" title="again" class="mail-remote">`)
+  assert.equal(r.remote.length, 1, 'one URL, one asset')
+  assert.doesNotMatch(r.html, /cdn\.example\.com/, 'the URL is not in the document at all')
+  // Loaded or not, the placeholder is the same markup: the asset decides, so update() can fill it.
+  assert.equal(sanitizeHtml(`<img src="${url}" alt="x">`, { mail: true, remote: { mode: 'placeholder', loaded: () => true } }).remoteImages, 0)
+})
+
+test('mail layout: logos, avatars and tiny pictures are minor (hidden); a symbol picture is its symbol; pixels go', () => {
+  assert.match(mail('<img src="https://cdn.example.com/logo.png" alt="Example Co">'), /class="mail-remote mail-minor"/, 'by name')
+  assert.match(mail('<img src="https://cdn.example.com/u/1.png" alt="Avatar of Ann Example">'), /mail-minor/, 'by alt')
+  assert.match(mail('<img src="https://cdn.example.com/u/1.png" alt="Ann Example" title="avatar">'), /mail-minor/, 'by title')
+  assert.match(mail('<img src="https://cdn.example.com/i.png" width="24" height="24">'), /mail-minor/, 'by size')
+  assert.match(mail('<img src="https://cdn.example.com/photo.jpg" width="600" alt="Team">'), /class="mail-remote"/)
+  assert.equal(mail('<img src="https://cdn.example.com/p.gif" width="1" height="1">'), '')
+  // Jira draws the arrow of a status move as a 16 px picture with the arrow as its alt.
+  assert.equal(mail('Backlog<img src="https://jira.example.com/arrow.png" alt="&rarr;" width="16" height="16">Ready'), 'Backlog → Ready')
+  assert.equal(isMinor({ attrs: new Map([['width', '600']]) }, 'https://cdn.example.com/banner.png', 'Banner'), false)
+})
+
+test('label mode: a loaded picture is a picture, a minor one not loaded is nothing', () => {
+  const url = 'https://cdn.example.com/hero.png'
+  const id = remoteAssetId(url)
+  assert.equal(clean(`<img src="${url}" alt="Hero">`, { remote: { mode: 'label', loaded: (x) => x === id } }), `<img data-asset="${id}" alt="Hero" title="Hero">`)
+  assert.equal(clean('<img src="https://cdn.example.com/logo.png" alt="Example Co">'), '')
+})
+
+test('entities: an alt the sender escaped twice reads as its character (the Jira arrow), once is not decoded again', () => {
+  // The bug: Jira sends alt="&amp;#x2192;", shown as the literal text &#x2192;.
+  assert.equal(attrText('&amp;#x2192;'), '→')
+  assert.equal(attrText('&#x2192;'), '→')
+  assert.equal(attrText('Tom &amp; Jerry'), 'Tom & Jerry', 'decoded once: nothing left to decode')
+  assert.equal(attrText('a &amp;amp; b'), 'a & b', 'decoded again where a character reference remains')
+  assert.equal(attrText('&amp;amp;amp;'), '&amp;', 'never more than twice')
+  assert.match(mail('<img src="https://cdn.example.com/hero.png" alt="Next &amp;#x2192;" width="600">'), /alt="Next →"/)
+  assert.equal(mail('To Do<img src="https://jira.example.com/a.png" alt="&amp;#x2192;" width="16" height="16">Done'), 'To Do → Done')
+})
+
+test('mail layout: a lone View / Open link is a call to action; a link in a sentence is not', () => {
+  assert.equal(mail('<p><a href="https://example.com/t/1">View ticket</a></p>'), '<p><a href="https://example.com/t/1" class="mail-cta">View ticket</a></p>')
+  assert.equal(mail('<div><a href="https://example.com/x">Open in Example</a></div>'), '<div><a href="https://example.com/x" class="mail-cta">Open in Example</a></div>')
+  assert.equal(mail('<p>Please <a href="https://example.com/t/1">view the ticket</a> today.</p>'), '<p>Please <a href="https://example.com/t/1">view the ticket</a> today.</p>')
+  assert.equal(clean('<p><a href="https://example.com/t/1">View ticket</a></p>'), '<p><a href="https://example.com/t/1">View ticket</a></p>', 'only in the mail layout')
+})
+
+const BODY = '<p>Hello Ann, your order shipped today and arrives on Friday.</p>'
+const FOOTER = '<p>You are receiving this because you subscribed to Example News. <a href="https://example.com/unsub">Unsubscribe</a> · Example Co, 1 Example Street</p>'
+
+test('footer folding: the sender\'s unsubscribe block at the end folds into "Sender\'s footer"', () => {
+  const out = mail(`<p>Hello Ann,</p><p>Your order shipped today and arrives on Friday.</p>${FOOTER}`)
+  assert.match(out, /^<p>Hello Ann,<\/p><p>Your order shipped today and arrives on Friday\.<\/p><details class="mail-footer"><summary>Sender's footer<\/summary><p>You are receiving this/)
+  assert.match(out, /<\/details>$/)
+  assert.equal(sanitizeHtml(`${BODY}${FOOTER}`, { mail: true, remote: { mode: 'placeholder' } }).footer, true)
+})
+
+test('footer folding is conservative: no unsubscribe link, more text after it, a quote after it, a data table, or only a footer', () => {
+  const folded = (html) => /mail-footer/.test(mail(html))
+  assert.equal(folded(`${BODY}${FOOTER}`), true)
+  assert.equal(folded(`${BODY}<p>You are receiving this because you subscribed. Unsubscribe by replying STOP.</p>`), false, 'no link')
+  assert.equal(folded(`${BODY}${FOOTER}<p>${'More of the real message. '.repeat(40)}</p>`), false, 'long content after it')
+  assert.equal(folded(`${BODY}${FOOTER}<blockquote type="cite">old</blockquote>`), false, 'a quote after it')
+  assert.equal(folded(`${BODY}<table><tr><th>Item</th><th>Price</th></tr><tr><td>Unsubscribe <a href="https://example.com/u">here</a> you are receiving this</td><td>1</td></tr></table>`), false, 'in a data table')
+  assert.equal(folded(FOOTER), false, 'a mail that is only a footer keeps it')
+  assert.equal(folded(`<p>Hi</p>${FOOTER}`), false, 'too little text before it')
+  // Folded in every view (a plain details: an older reviewer and the reader page fold it too), unless asked not to.
+  assert.equal(/mail-footer/.test(clean(`${BODY}${FOOTER}`)), true)
+  assert.equal(/mail-footer/.test(clean(`${BODY}${FOOTER}`, { foldFooter: false })), false)
 })

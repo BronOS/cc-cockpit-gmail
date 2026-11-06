@@ -16,10 +16,23 @@
 //   link loses its own), `data-asset` + `alt` + `title` on an image, `colspan` / `rowspan` on a
 //   data table's cells, `title` (cut). No class, id, style, event handler or anything else of the
 //   mail's survives.
-// - images: never loaded from the network. A `cid:` image (a part of the mail itself) becomes a
-//   reviewer asset when the caller downloaded it (`o.cid`); an http(s) image is a "[image: alt]"
-//   link (remote images are tracking pixels at worst: a 1x1 one is dropped altogether); any other
-//   src is its alt text.
+// - images: never loaded from here. A `cid:` image (a part of the mail itself) becomes a reviewer
+//   asset when the caller downloaded it (`o.cid`). An http(s) image (0.6.0) is never a link: in the
+//   mail layout (`o.remote.mode` 'placeholder') it is `<img data-asset="r…" class="mail-remote">`
+//   naming the asset the host may load later (images.remoteAssetId of its URL), which the reviewer
+//   shows as a dashed chip with the alt text until the asset comes; elsewhere ('label') it is the
+//   "[image: alt]" text, or the picture when the host loaded it already (`o.remote.loaded`). A 1x1
+//   one is a tracking pixel and dropped altogether; a logo, an avatar or a tiny one is `mail-minor`
+//   (hidden until loaded) or, as a label, dropped; a tiny one whose alt is a symbol (Jira's "→") is
+//   that symbol as text. Any other src is its alt text. The remote ones are listed in the result
+//   (`remote`), for the host's loader.
+// - the sender's footer (0.6.0): boilerplate after the last content block (unsubscribe, privacy
+//   policy, "this email was sent by", app-store badges, manage preferences) is folded into a
+//   `<details class="mail-footer">` "Sender's footer" (foldFooter: conservative, see there).
+// - a lone "View …" / "Open …" link (the call to action of a notification) gets `mail-cta` with
+//   `o.mail`, so the mail layout draws it as a button.
+// - alt and title: decoded once more when a decoded value still holds a character reference
+//   (senders that escape twice, such as Jira's `alt="&amp;#x2192;"`, showed `&#x2192;` literally).
 // - quoted history (Gmail's `gmail_quote`, Apple Mail's `blockquote type=cite`, Outlook's
 //   `divRplyFwdMsg` and what follows it, Yahoo's `yahoo_quoted`) is folded into `<details>`.
 // - hidden content (`display:none`, `visibility:hidden`, `hidden`): the preheader text marketing
@@ -36,6 +49,14 @@
 // levels of nesting (deeper elements are flattened, their text kept), 100,000 nodes.
 
 const { esc, decode } = require('./entities')
+const { sha } = require('./util')
+
+/**
+ * The reviewer asset id of a remote picture: `r` and a hash of its URL (letters and digits, as the
+ * reviewer's ids are). The same URL twice in a mail is one asset; the host's loader names the
+ * picture it fetched with the same id, so it fills every placeholder of that URL.
+ */
+const remoteAssetId = (url) => `r${sha(url, 20)}`
 
 const MAX_INPUT = 2000000
 const MAX_DEPTH = 200
@@ -43,6 +64,7 @@ const MAX_NODES = 100000
 const MAX_ATTRS = 100
 const MAX_TITLE = 300
 const MAX_HREF = 2048
+const MAX_REMOTE = 200 // remote pictures listed per body (the loader takes 30 a mail at most anyway)
 
 const ALLOWED = new Set([
   'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'br', 'hr', 'ul', 'ol', 'li', 'pre', 'code', 'blockquote',
@@ -429,8 +451,55 @@ function isPixel(node) {
   return (Number.isFinite(w) && w <= 3) || (Number.isFinite(h) && h <= 3)
 }
 
+/** The width and height an <img> declares (attribute first, then its style), NaN when not given. */
+function dims(node) {
+  const style = decode(node.attrs.get('style') || '').toLowerCase()
+  const sw = /(?:^|;)\s*width\s*:\s*(\d+)px/.exec(style)
+  const sh = /(?:^|;)\s*height\s*:\s*(\d+)px/.exec(style)
+  const w = node.attrs.has('width') ? px(node.attrs.get('width')) : sw ? Number(sw[1]) : NaN
+  const h = node.attrs.has('height') ? px(node.attrs.get('height')) : sh ? Number(sh[1]) : NaN
+  return { w, h }
+}
+
+// A picture that is chrome, not content: the sender's logo, a person's avatar, a social or
+// app-store badge, a spacer or an icon. Read from its alt, title and file name.
+const MINOR_NAME = /(?:^|[^a-z])(?:logo|logos|avatar|icon|icons|badge|spacer|divider|signature|facebook|twitter|linkedin|instagram|youtube|tiktok|app ?store|google ?play|get it on|download on)(?:[^a-z]|$)/i
+
+/**
+ * Whether a remote picture is minor (hidden in the mail layout until the pictures are loaded, and
+ * left out of a label): tiny by its declared size (both sides at most 48 px, or one at most 24) or
+ * named like a logo, an avatar or a badge.
+ */
+function isMinor(node, src, alt) {
+  const { w, h } = dims(node)
+  if (Number.isFinite(w) && Number.isFinite(h) && w <= 48 && h <= 48) return true
+  if ((Number.isFinite(w) && w <= 24) || (Number.isFinite(h) && h <= 24)) return true
+  let file = ''
+  try {
+    file = decodeURIComponent(new URL(src).pathname.split('/').pop() || '')
+  } catch {
+    // Not a URL we can read a name from: the alt alone decides.
+  }
+  return MINOR_NAME.test(alt) || MINOR_NAME.test(String(node.attrs.get('title') || '')) || MINOR_NAME.test(file.replace(/[_-]/g, ' '))
+}
+
+/** An alt that is a symbol standing for a word (Jira's status arrow "→"): at most 3 characters, no letter or digit. */
+const isSymbolAlt = (alt) => alt.length > 0 && alt.length <= 3 && !/[\p{L}\p{N}]/u.test(alt)
+
+/**
+ * An attribute value as text: entities decoded, and decoded once more when the result still holds a
+ * character reference. HTML decodes an attribute once; some senders escape twice (Jira writes
+ * `alt="&amp;#x2192;"` for an arrow), and a person never means `&#x2192;` as the text of an alt.
+ */
+function attrText(v) {
+  const once = decode(v)
+  return /&(?:#[xX][0-9a-fA-F]{1,8}|#[0-9]{1,10}|[A-Za-z][A-Za-z0-9]{1,31});/.test(once) ? decode(once) : once
+}
+
 /** Whether a table is for layout (unwrapped) rather than data (kept as a table). */
 function isLayoutTable(table) {
+  // Decided once, before foldFooter moves rows out of a table (fewer rows could change the answer).
+  if (table.layout !== undefined) return table.layout
   const role = String(table.attrs.get('role') || '').toLowerCase()
   if (role === 'presentation' || role === 'none') return true
   let maxCells = 0
@@ -450,7 +519,8 @@ function isLayoutTable(table) {
     }
   }
   walk(table, 0)
-  return nested || maxCells < 2
+  table.layout = nested || maxCells < 2
+  return table.layout
 }
 
 const HEADING = /^h[1-6]$/
@@ -464,14 +534,207 @@ const HEADING = /^h[1-6]$/
  *   caller has, else null (then the image is its alt text)
  * @param {number} [o.headingShift] added to heading levels (default 2: a message card sits under the
  *   thread's h1 and the message's h2)
- * @returns {{ html: string, usedCids: Set<string>, remoteImages: number, truncated: boolean }}
+ * @param {{ mode?: 'placeholder' | 'label', loaded?: (id: string) => boolean }} [o.remote] how a
+ *   remote picture is written: 'placeholder' (the reviewer's mail layout: an asset image that shows as
+ *   a chip until loaded) or 'label' (the default: its alt as text, unless `loaded(id)` says the host
+ *   has it, then the picture)
+ * @param {boolean} [o.mail] mark call-to-action links `mail-cta` (the mail layout's button)
+ * @param {boolean} [o.foldFooter] fold the sender's footer (default true)
+ * @returns {{ html: string, usedCids: Set<string>, remoteImages: number, remote: { id: string, url: string, alt: string, minor: boolean }[], footer: boolean, truncated: boolean }}
+ *   `remoteImages`: the remote pictures not shown (not loaded); `remote`: each remote picture once
  */
 function sanitizeHtml(html, o = {}) {
   const { root, truncated } = parse(html)
-  const c = { cid: typeof o.cid === 'function' ? o.cid : () => null, shift: Number.isInteger(o.headingShift) ? o.headingShift : 2, usedCids: new Set(), remoteImages: 0 }
+  const r = o.remote || {}
+  const c = {
+    cid: typeof o.cid === 'function' ? o.cid : () => null,
+    shift: Number.isInteger(o.headingShift) ? o.headingShift : 2,
+    usedCids: new Set(),
+    remoteImages: 0,
+    remote: new Map(),
+    placeholder: r.mode === 'placeholder',
+    loaded: typeof r.loaded === 'function' ? r.loaded : () => false,
+    mail: Boolean(o.mail),
+  }
+  const footer = o.foldFooter === false ? false : foldFooter(root)
   let out = children(root, { folded: false, inLink: false, table: null, pre: false }, c, 0)
   if (truncated) out += '<p><em>(This mail is too long to show in full here; Gmail has the rest.)</em></p>'
-  return { html: out, usedCids: c.usedCids, remoteImages: c.remoteImages, truncated }
+  return { html: out, usedCids: c.usedCids, remoteImages: c.remoteImages, remote: [...c.remote.values()], footer, truncated }
+}
+
+// ---- the sender's footer ----
+
+// What a sender's boilerplate says: unsubscribe, a privacy policy, "this email was sent by", the
+// app-store badges, managing preferences. Read in a block's text and its pictures' alt texts.
+const FOOTER_SIGNAL = new RegExp(
+  [
+    '\\bunsubscrib',
+    '\\bprivacy (?:policy|notice|statement)\\b',
+    '\\bthis (?:e-?mail|message|notification) (?:was|is|has been) sent (?:to|by|from)\\b',
+    '\\bmanage (?:your )?(?:e-?mail |notification |subscription |communication )?(?:preferences|settings|subscriptions)\\b',
+    '\\b(?:update|change) your (?:e-?mail |notification )?preferences\\b',
+    '\\b(?:e-?mail|notification) preferences\\b',
+    '\\bapp store\\b',
+    '\\bgoogle play\\b',
+    "\\byou(?:'re| are)? receiv(?:ed|ing) this (?:e-?mail|message|notification)\\b",
+    '\\bopt[ -]out\\b',
+  ].join('|'),
+  'i',
+)
+const FOOTER_SHORT = 200 // a block after the footer starts may be boilerplate this long without a signal of its own
+const FOOTER_SIGNAL_MAX = 600 // a block with a signal but longer than this mixes content in: not a footer start
+const FOOTER_CONTENT_MIN = 40 // the mail must have this much text before its footer
+// Blocks for the footer's walk: an element whose own text is one unit (a table cell counts: layout
+// tables put each line of a footer in a cell).
+const TEXT_BLOCK = new Set(['p', 'div', 'td', 'th', 'li', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'blockquote', 'pre', 'dd', 'dt', 'center', 'section', 'article', 'header', 'footer', 'main', 'address', 'figure', 'figcaption', 'table', 'tr', 'ul', 'ol', 'dl', 'aside', 'nav'])
+// The fold never cuts through one of these: it would split a link, a list, preformatted text or a
+// data table, which the reader then sees broken.
+const NO_CUT = new Set(['a', 'pre', 'ul', 'ol', 'dl', 'li', 'dt', 'dd', 'blockquote', 'details', 'summary', 'figure', 'figcaption'])
+
+/**
+ * Folds the sender's footer into a `#footer` node at the end of `root` (written as `<details
+ * class="mail-footer"><summary>Sender's footer</summary>…</details>`); true when it did.
+ *
+ * The walk lists the text blocks in document order (innermost block owns its text; a picture adds
+ * its alt). The footer starts at the first block that has a signal (FOOTER_SIGNAL) and is at most
+ * FOOTER_SIGNAL_MAX characters, such that every later block has a signal or is short boilerplate
+ * (FOOTER_SHORT). Conservative: nothing is folded when the region has no link (a personal mail's
+ * last line that says "unsubscribe" stays), when less than FOOTER_CONTENT_MIN characters of text
+ * come before it, when quoted history comes after it (the walk stops at a quote: a reply's footer
+ * belongs to the quote, which is folded anyway), or when the cut would pass through a link, a list,
+ * preformatted text or a data table.
+ *
+ * The cut is lifted to the outermost element that starts with the footer's first block, then that
+ * element, its later siblings and the later siblings of each ancestor move, in order, into the fold.
+ */
+function foldFooter(root) {
+  const blocks = [] // { node, text, links }
+  const byNode = new Map()
+  let barrier = false
+  const add = (owner, text, links = 0) => {
+    let b = byNode.get(owner)
+    if (!b) {
+      b = { node: owner, text: '', links: 0 }
+      byNode.set(owner, b)
+      blocks.push(b)
+    }
+    b.text += text
+    b.links += links
+  }
+  const walk = (n, owner, depth) => {
+    if (barrier || depth > MAX_DEPTH) return
+    for (const k of n.children || []) {
+      if (barrier) return
+      if (k.text !== undefined) {
+        if (k.text.trim()) add(owner, k.text)
+        continue
+      }
+      if (isHidden(k)) continue
+      if (isQuote(k) || isOutlookQuoteStart(k)) {
+        barrier = true
+        return
+      }
+      if (k.name === 'img') {
+        const alt = attrText(k.attrs.get('alt') || k.attrs.get('title') || '').trim()
+        if (alt) add(owner, ` ${alt} `)
+        continue
+      }
+      if (k.name === 'a' && safeHref(decode(k.attrs.get('href') || ''))) add(owner, '', 1)
+      walk(k, TEXT_BLOCK.has(RENAME[k.name] || k.name) ? k : owner, depth + 1)
+    }
+  }
+  walk(root, root, 0)
+  const len = (b) => b.text.replace(/\s+/g, ' ').trim().length
+  let start = -1
+  let before = 0
+  for (let i = 0; i < blocks.length; i++) {
+    const b = blocks[i]
+    const t = b.text.replace(/\s+/g, ' ')
+    if (FOOTER_SIGNAL.test(t) && len(b) <= FOOTER_SIGNAL_MAX && before >= FOOTER_CONTENT_MIN && b.node !== root) {
+      const rest = blocks.slice(i + 1)
+      if (!barrier && rest.every((x) => FOOTER_SIGNAL.test(x.text.replace(/\s+/g, ' ')) || len(x) <= FOOTER_SHORT) && [b, ...rest].some((x) => x.links > 0)) {
+        start = i
+        break
+      }
+    }
+    before += len(b)
+  }
+  if (start < 0) return false
+  // A block that also holds earlier content (its text runs on around a nested block that came first)
+  // is no footer start: its node would carry that content into the fold.
+  let cut = blocks[start].node
+  if (blocks.slice(0, start).some((b) => contains(cut, b.node))) return false
+  // Lift: while the cut is the first child with anything in it of its parent, the parent starts with
+  // the footer too.
+  while (cut.parent && cut.parent !== root && firstMeaningful(cut.parent) === cut && !NO_CUT.has(cut.parent.name) && !isDataTablePart(cut.parent)) cut = cut.parent
+  for (let a = cut.parent; a && a !== root; a = a.parent) {
+    if (NO_CUT.has(RENAME[a.name] || a.name) || isDataTablePart(a)) return false
+  }
+  if (NO_CUT.has(cut.name) && cut.name !== 'blockquote') return false
+  // Tables on the way decide their layout now, while they still have all their rows.
+  for (let a = cut; a && a !== root; a = a.parent) if (a.name === 'table') isLayoutTable(a)
+  const moved = []
+  let node = cut
+  let first = true
+  while (node && node !== root) {
+    const parent = node.parent
+    const at = parent.children.indexOf(node)
+    moved.push(...parent.children.splice(first ? at : at + 1))
+    first = false
+    node = parent
+  }
+  const fold = { name: '#footer', attrs: new Map(), children: moved, parent: root }
+  for (const m of moved) if (m.name !== undefined) m.parent = fold
+  root.children.push(fold)
+  return true
+}
+
+/** Whether `node` is `inner` or one of its ancestors. */
+function contains(node, inner) {
+  for (let n = inner; n; n = n.parent) if (n === node) return true
+  return false
+}
+
+/** The first child that has text or an element in it (whitespace text skipped). */
+function firstMeaningful(node) {
+  return (node.children || []).find((k) => (k.text !== undefined ? k.text.trim() !== '' : true)) || null
+}
+
+/** A data table or a part of one (its rows and cells): never cut through. */
+function isDataTablePart(node) {
+  for (let n = node; n && n.name !== '#root'; n = n.parent) {
+    if (n.name === 'table') return !isLayoutTable(n)
+    if (!['tr', 'td', 'th', 'tbody', 'thead', 'tfoot'].includes(n.name)) return false
+  }
+  return false
+}
+
+// ---- call-to-action links ----
+
+const CTA = /^(?:view|open)\b/i
+const INLINE_WRAP = new Set(['span', 'strong', 'b', 'em', 'i', 'font', 'u'])
+
+/** The text of a tree node (hidden parts left out), bounded by depth. */
+function textOf(n, depth = 0) {
+  if (n.text !== undefined) return n.text
+  if (depth > MAX_DEPTH || isHidden(n)) return ''
+  let t = ''
+  for (const k of n.children || []) t += textOf(k, depth + 1)
+  return t
+}
+
+/**
+ * A lone "View …" / "Open …" link: its text starts so and is short (a call to action, not a
+ * sentence), and it is all its block holds (wrappers like <strong> or <font> around it count as the
+ * link), as notification mails put their main button.
+ */
+function isCta(a) {
+  const text = textOf(a).replace(/\s+/g, ' ').trim()
+  if (!CTA.test(text) || text.length > 40) return false
+  let block = a.parent
+  while (block && INLINE_WRAP.has(block.name)) block = block.parent
+  if (!block || block.name === '#root') return false
+  return textOf(block).replace(/\s+/g, ' ').trim() === text
 }
 
 function children(node, x, c, depth) {
@@ -498,10 +761,18 @@ function fold(inner) {
   return `<details><summary>Quoted text</summary>${inner}</details>`
 }
 
+function footerFold(inner) {
+  return `<details class="mail-footer"><summary>Sender's footer</summary>${inner}</details>`
+}
+
 function one(n, x, c, depth) {
   if (n.text !== undefined) return esc(n.text)
   if (depth > MAX_DEPTH) return ''
   if (isHidden(n)) return ''
+  if (n.name === '#footer') {
+    const inner = children(n, x, c, depth + 1)
+    return inner.trim() ? footerFold(inner) : ''
+  }
   const name = RENAME[n.name] || n.name
   if (!x.folded && isQuote(n)) {
     const inner = children(n, { ...x, folded: true }, c, depth + 1)
@@ -533,7 +804,7 @@ function one(n, x, c, depth) {
     const inner = children(n, { ...x, inLink: x.inLink || Boolean(href) }, c, depth + 1)
     if (!href) return inner
     if (!inner.trim()) return ''
-    return `<a href="${esc(href)}"${title(n)}>${inner}</a>`
+    return `<a href="${esc(href)}"${title(n)}${c.mail && isCta(n) ? ' class="mail-cta"' : ''}>${inner}</a>`
   }
   if (HEADING.test(name)) {
     const level = Math.min(6, Number(name[1]) + c.shift)
@@ -555,7 +826,7 @@ function one(n, x, c, depth) {
 function title(n) {
   const t = n.attrs.get('title')
   if (!t) return ''
-  const v = decode(t).replace(/\s+/g, ' ').trim().slice(0, MAX_TITLE)
+  const v = attrText(t).replace(/\s+/g, ' ').trim().slice(0, MAX_TITLE)
   return v ? ` title="${esc(v)}"` : ''
 }
 
@@ -568,10 +839,10 @@ function span(n) {
   return s
 }
 
-/** An <img>: an inline part as an asset, a remote picture as a link, anything else as its alt. */
+/** An <img>: an inline part as an asset, a remote picture as a placeholder or its label, anything else as its alt. */
 function image(n, x, c) {
   const src = decode(n.attrs.get('src') || '').trim()
-  const alt = decode(n.attrs.get('alt') || n.attrs.get('title') || '').replace(/\s+/g, ' ').trim().slice(0, MAX_TITLE)
+  const alt = attrText(n.attrs.get('alt') || n.attrs.get('title') || '').replace(/\s+/g, ' ').trim().slice(0, MAX_TITLE)
   const label = alt ? `[image: ${alt}]` : '[image]'
   if (/^cid:/i.test(src)) {
     const key = cidKey(src.slice(4))
@@ -586,9 +857,27 @@ function image(n, x, c) {
   const href = safeHref(src)
   if (href && !href.startsWith('mailto:')) {
     if (isPixel(n)) return ''
-    c.remoteImages++
-    // Inside a link the picture is that link's text: a link in a link is not HTML.
-    return x.inLink ? esc(label) : `<a href="${esc(href)}">${esc(label)}</a>`
+    const minor = isMinor(n, href, alt)
+    // A tiny picture standing for a symbol (an arrow between two statuses) reads as that symbol.
+    // Spaces around it (HTML collapses doubles): "Backlog → Ready", not "Backlog→Ready".
+    if (minor && isSymbolAlt(alt)) return ` ${esc(alt)} `
+    const id = remoteAssetId(href)
+    if (!c.remote.has(id) && c.remote.size < MAX_REMOTE) c.remote.set(id, { id, url: href, alt, minor })
+    const loaded = c.remote.has(id) && c.loaded(id)
+    if (!loaded) c.remoteImages++
+    if (c.placeholder) {
+      // The reviewer draws an image whose asset it has not got as a chip with its alt text, and fills
+      // it in place when update() brings the asset (no link: the picture is not the sender's page).
+      const a = esc(alt || 'image')
+      return `<img data-asset="${esc(id)}" alt="${a}" title="${a}" class="mail-remote${minor ? ' mail-minor' : ''}">`
+    }
+    if (loaded) {
+      const a = esc(alt || 'image')
+      return `<img data-asset="${esc(id)}" alt="${a}" title="${a}">`
+    }
+    if (minor) return ''
+    // Inside a link the label is that link's text; elsewhere a muted text, never a link of its own.
+    return x.inLink ? esc(label) : `<span class="muted">${esc(label)}</span>`
   }
   return alt ? esc(label) : ''
 }
@@ -612,9 +901,9 @@ const BLOCK = new Set(['p', 'div', 'br', 'tr', 'li', 'h1', 'h2', 'h3', 'h4', 'h5
 /**
  * A mail's HTML as plain text (the reviewer's text mode, `ccc gmail show`, Discuss): blocks on their
  * own lines, list items with "- ", a link as `text <url>` when the text is not the address, hidden
- * parts and images left out, quoted history kept but marked.
+ * parts and images left out (with `o.alts`, an image is its alt text), quoted history kept but marked.
  */
-function htmlToText(html) {
+function htmlToText(html, o = {}) {
   const { root } = parse(html)
   const parts = []
   const walk = (n, depth, inLink) => {
@@ -625,7 +914,14 @@ function htmlToText(html) {
     if (depth > MAX_DEPTH || isHidden(n)) return
     const name = n.name
     if (name === 'br') return void parts.push('\n')
-    if (name === 'img') return
+    if (name === 'img') {
+      // `o.alts`: a picture's alt as text (the Jira card reads "Backlog → Ready" where the arrow is a picture).
+      if (o.alts) {
+        const alt = attrText(n.attrs.get('alt') || '').replace(/\s+/g, ' ').trim()
+        if (alt) parts.push(` ${alt} `)
+      }
+      return
+    }
     if (name === 'li') parts.push('\n- ')
     else if (BLOCK.has(name)) parts.push('\n')
     if (name === 'td' || name === 'th') parts.push(' ')
@@ -710,4 +1006,4 @@ function textToHtml(text) {
   return paragraphs(body) + (inner ? `\n${fold(inner)}` : '')
 }
 
-module.exports = { tokenize, parse, sanitizeHtml, htmlToText, textToHtml, linkify, safeHref, cidKey, isLayoutTable, ALLOWED, RENAME, DROP, MAX_INPUT, MAX_DEPTH }
+module.exports = { tokenize, parse, sanitizeHtml, htmlToText, textToHtml, linkify, safeHref, cidKey, isLayoutTable, remoteAssetId, attrText, isMinor, ALLOWED, RENAME, DROP, MAX_INPUT, MAX_DEPTH, FOOTER_SIGNAL }
