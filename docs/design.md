@@ -11,6 +11,11 @@ Jira plugin's `jira` service (section "Jira mail"), and a pasted client that sur
 0.3.0 (2026-11-03, asked for by the user): the first write, limited to the read state: Mark read /
 Mark unread and markReadOnOpen (section "Read state"), with the scope gmail.modify; no app change
 needed (cc-cockpit 0.9.3).
+0.6.0 (2026-11-06, the mail overlay redesign the user approved from a mock-up): the reviewer's mail
+layout (annotate `kind: 'mail'`), remote pictures on request through the host with an SSRF guard and
+an optional proxy, the sender's footer folded, the Jira issue as a card (sections "The thread view"
+and "Remote images"). Needs the reviewer of cc-cockpit 0.13.0 (features `mail`, `actions`, `update`)
+for the layout and the buttons; an older app gets the cards as before.
 
 Prior art (port its decisions, not its user-specific text): the old cockpit's mail connector
 `~/Projects/claude-config/cockpit/connectors/mail.py` and `lib/convs.py` (queries, alert
@@ -141,15 +146,71 @@ Header: title bar meta (last poll · address) and ↻. Not signed in: the panel 
 - `threads.get format=full` fresh on open. Each message as a card: sender, to/cc, date, then the
   body: `text/html` part sanitized by our own builder into the reviewer's allow-list (as Jira's
   `adfhtml`: parse, keep only allowed tags, escape every text, links http(s)/mailto only, no style
-  attributes, no remote images: an `<img>` with an http(s) src becomes a "[image: alt]" link,
-  since remote images are tracking pixels), else `text/plain` as paragraphs. Quoted history
+  attributes, no remote images: an `<img>` with an http(s) src becomes a muted "[image: alt]"
+  label, since remote images are tracking pixels; a link until 0.6.0, which let one click load it
+  outside the rules below), else `text/plain` as paragraphs. Quoted history
   (`gmail_quote`, `blockquote type=cite`) folded into `<details>`.
+- The mail layout (0.6.0): when the reviewer's `features()` has `mail`, annotate gets `kind: 'mail'`
+  and the document uses the reviewer's `mail-*` classes (`document.js` `messageCard`): `<h1>`
+  subject, the Jira card, the images bar, then per message a `mail-head` (initials avatar, name and
+  address, "to … · cc …", "Today HH:MM" and an Unread chip) and the `mail-body`. No aside unless the
+  issue is a companion. A lone call-to-action link ("View …", "Open …") gets `mail-cta`. An older
+  reviewer gets the 0.5 cards (asked once per open, never assumed).
+- The sender's footer (`sanitize.js` `foldFooter`, every view): folded into `<details
+  class="mail-footer">` "Sender's footer" only at the end of a body, from the first short block
+  with a footer signal (unsubscribe, privacy policy, "this email was sent to", manage preferences,
+  app-store badges, opt out) when every later block is a signal or short boilerplate, some block of
+  it has a link, 40+ characters of text come before it, no quote follows, and the cut does not
+  pass through a link, list, `pre` or data table. A false fold hides real text, so each doubt keeps
+  the mail as written.
+- Attribute entities: an alt or title decoded once more when a character reference remains (Jira
+  sends `alt="&amp;#x2192;"` for its status arrow, shown as the literal `&#x2192;` before 0.6.0).
 - Inline images (`cid:` parts) and image attachments: downloaded through
   `users.messages.attachments.get` (raster types only, checked by magic number, the same budgets
   as Jira's images.js: at most 15, 700 KiB each, 7.5 MiB in all) as reviewer assets.
 - Other attachments listed (name, size) with no download in v1.
 - `aside`: from, to, cc, date, labels, the thread's message count, the Gmail link.
 - Discuss / New session send a prompt `About the mail "<subject>" from <sender>` + readable text.
+
+## Remote images (0.6.0)
+
+Code: `lib/remote.js` (fetch, address rules, loader, policy), `sanitize.js` (placeholders), the
+host's `startRemote` / `onReviewerAction`. Decisions:
+
+- **Who fetches**: the host (Node), never the page: the reviewer's CSP allows no remote image, and
+  a page fetch would carry the app's cookies and headers. The bytes go to the reviewer as assets
+  (`r` + 20 hex of the URL's sha256, so one URL is one asset).
+- **When**: `showRemote`: Remote images "Always", the message's sender on the always-show list
+  (`ctx.appStorage` `imageSenders`, read again on each open since another window may change it), or
+  Show images pressed on that reviewer key this run. Else placeholders: `<img data-asset class=
+  "mail-remote">` whose asset the reviewer was not given draws as a dashed chip with the alt; the
+  minor ones (logos, avatars, both sides at most 48 px or one at most 24, by name, alt or title)
+  carry `mail-minor` and are hidden until loaded. The bar counts the others.
+- **Buttons**: the bar's `<span data-action="show-images">` and `"always-sender"` are buttons in
+  the reviewer (feature `actions`); a click is the reviewer service event `action { key, id,
+  caller }`, acted on only for `caller === ctx.pluginId` and a key in `S.views` (the newest 10
+  opened, holding the URLs not loaded and the budget left). The pictures go in with `update({ key,
+  assets, hide: ['images-bar'], status? })` (feature `update`): in place, the notes' anchors kept.
+  The bar stays, with the reason as the status, when none could be loaded. A key not remembered (a
+  restart) gets a status asking to open the mail again. Without both features the bar has no buttons.
+- **SSRF**: `dns.lookup({ all: true })`, every address checked (`blockedAddress`: loopback,
+  private, link-local, CGNAT, this-network, multicast, reserved and documentation ranges, IPv6
+  unique-local, link-local, site-local, multicast, Teredo; IPv4-mapped, IPv4-compatible, NAT64 and
+  6to4 read as their IPv4 address), then the connection pinned to the first checked address (a
+  `lookup` passed to `http(s).request`, `agent: false`): no rebinding between check and connect.
+  http(s) only, no credentials, at most 3 redirects each checked again.
+- **Type and size**: Content-Type png/jpeg/gif/webp and the magic bytes (`images.sniff`); SVG never.
+  700 KiB a picture (Content-Length and while streaming), 5.5 MiB, 30 pictures and the room the
+  mail's `cid:` pictures and a Jira issue (its JIRA_DOC share, reserved before it answers) leave of
+  30 assets / 7.5 MiB; 10 s a picture, 15 s all; 4 at a time; content before minor ones.
+- **Proxy** (`imageProxy`, `{url}` URL-encoded; none built in): the template's scheme+host+port is
+  exempt from the address check (the person chose it; a proxy on the LAN is common). The target URL
+  is checked statically, never resolved (resolving it would tell the sender's DNS of the open):
+  scheme, credentials, an IP literal by the table, `localhost`/`.local`/`.internal`/single-label
+  names refused. Redirects from the proxy are checked normally (exempt only back on its host). A bad
+  template is a panel problem and loads nothing, rather than fetching directly behind the person's back.
+- **Older reviewer** (no `mail`): label mode: loaded pictures as images, the rest as a muted
+  "[image: alt]", minor ones dropped; no buttons. The own reader page gets the same.
 
 ## Jira mail (0.2.0, the bronos.jira `jira` service v1)
 
@@ -197,6 +258,15 @@ ported, its text and the user's site and name not).
   column gets Jira issue / Status / Priority / Assignee (`(you)` when mine) from `issue()`. Any
   failure: the mail alone plus `The issue is not shown here: <why>`, logged. The reviewer's text
   fallback gets one `Jira issue KEY: summary (status, priority, assignee) url` line first.
+- The card (0.6.0, mail layout; `jira.js` `relatedCard`): under the subject, `mail-related` with a
+  JIRA badge, `KEY · summary` (from `issue()`, else the subject without `Re:` and the `[JIRA]` /
+  `[Site]` / `(KEY)` prefixes) and a status line: the move the newest Jira message states
+  (`statusChange` on its plain part, else its html as text with picture alts: Jira's arrow is a
+  16 px picture), plus `now <status>` when `issue()` has moved on; without a move, `issue()`'s
+  status, type and assignee. Open is the existing https browse link (`<a class="mail-related-open">`,
+  opened by the reviewer's link handling): Jira's inbox-feed `act` knows only the issues of its own
+  panel, so it is no general "open this issue", and no new service method was worth adding for it.
+  The issue document stays below the mail (or beside it) as before.
 - `ccc gmail status` has a `jira` line (on / off).
 
 ## Read state (0.3.0: mark read / mark unread)

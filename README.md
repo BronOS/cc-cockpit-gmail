@@ -15,6 +15,10 @@ function that can do nothing else. Since 0.3.0 it asks Google for `gmail.modify`
 - **Discuss with Claude**: click a row and the thread opens in the reviewer overlay as a clean
   page (every message as a card, its pictures, its attachments listed), where you select text to
   add notes and press Discuss (the Claude tab you are looking at) or New session.
+- **Mail reading layout** (0.6.0, with cc-cockpit 0.13.0 or later): the subject, then each message
+  with its sender, recipients and time in one header, the text in a 760 px reading column, the
+  sender's footer folded away, a card for the Jira issue of a Jira mail, and remote pictures only
+  when you ask (see "Remote images").
 - **Mark read / Mark unread** (0.3.0): a button on each row; opening a thread leaves it unread
   unless you turn on `markReadOnOpen` (then it is marked read, as Gmail does).
 - **Jira mail** (0.2.0, with the [Jira plugin](https://github.com/BronOS/cc-cockpit-jira) enabled in
@@ -31,6 +35,11 @@ accounts.
   bar and `ctx.openExternal`). On an older app the panel says so and the plugin does nothing.
   **0.9.2 or later is recommended**: from 0.9.2 the links inside a mail (Open in Gmail among them)
   open in your browser, and Start over cancels a stuck sign-in.
+- **cc-cockpit 0.13.0 or later for the mail layout** (0.6.0): its reviewer has the `mail`, `actions`
+  and `update` features (the reading layout, the Show images buttons, pictures added to an open
+  mail). On an older app the thread opens as cards, as before, with a muted "[image: …]" label for
+  each remote picture (never a link) and no buttons; a sender on the always-show list, or Remote
+  images "Always", still gets its pictures there. The always-show list's page needs 0.10.1.
 - **Your own Google Cloud OAuth client** (free; the steps are below and in the panel). There is no
   shared client: Gmail's scopes are "restricted", so a client shared by every user would need
   Google's verification and a paid yearly security assessment, and it would tie your mail to
@@ -140,6 +149,17 @@ ccc plugin config bronos.gmail 'alertSenders=["alerts@grafana.example.com"]' pol
 ccc plugin config bronos.gmail 'lanes={"unread":true,"alerts":true,"read":false}'
 ```
 
+## Settings (app-wide: Settings > Plugins > Gmail)
+
+| Setting | Default | |
+|---|---|---|
+| Remote images (`remoteImages`) | Ask | Ask: remote pictures are placeholders and a bar offers **Show images** and **Always show from &lt;sender&gt;**. Always: every mail's pictures load when it opens |
+| Image proxy URL template (`imageProxy`) | empty | fetch remote pictures through your own image proxy: a URL with `{url}` where the picture's address goes, URL-encoded, e.g. `https://img.example.com/?url={url}`. Empty: fetched directly. No public proxy is built in |
+
+Under the form, **Always show remote pictures from** lists the senders whose mail opens with its
+pictures, with Remove and an Add box; "Always show from …" in a mail adds to it. The list is
+app-wide (every project window), kept in the plugin's app storage, at most 500 addresses.
+
 ## Lanes
 
 | Lane | Search |
@@ -197,9 +217,17 @@ prompt shows when Google refuses the first change for the scope (the Gmail box w
 
 ## The thread view
 
-Opening a thread reads it fresh from Gmail (`format=full`) and shows every message oldest first, as
-a card: sender, address, date, To and Cc, an "unread" mark, then the body, then its attachments.
-The details column has From, To, Cc, the dates, the labels, the message count and the Gmail link.
+Opening a thread reads it fresh from Gmail (`format=full`) and shows every message oldest first.
+
+With cc-cockpit 0.13.0 or later (the reviewer's mail layout): the subject first, then each message
+under a header of its own: the sender's initials, the name and address, "to …" (and "cc …") on the
+next line, and the time on the right ("Today 09:09") with an Unread chip under it. The text sits in
+a column of at most 760 px; a lone "View …" or "Open …" link is drawn as a button, other links stay
+calm. There is no details column (the headers carry it) unless the Jira issue is shown beside the mail.
+
+With an older app, each message is a card: sender, address, date, To and Cc, an "unread" mark, then
+the body, then its attachments, and the details column has From, To, Cc, the dates, the labels, the
+message count and the Gmail link.
 
 The page is built by the plugin from the mail's HTML with its own sanitizer, never shown as the
 sender wrote it: only plain formatting tags are kept (paragraphs, lists, tables of data, links,
@@ -208,9 +236,17 @@ links keep only `http(s)` and `mailto` addresses, hidden text (preheaders) is dr
 history (Gmail, Outlook, Apple Mail, Yahoo, Proton, `>` lines) folds into a "Quoted text" section.
 A mail with only a text part shows as paragraphs with its links.
 
-**Pictures**: the page never loads anything from the web. A remote picture (an `<img>` with an
-http address: often a tracking pixel that tells the sender you read the mail) is a "[image: alt]"
-link, and a page with any says so; pictures of 3 pixels or less (trackers) are dropped. Pictures inside the mail (`cid:`
+**The sender's footer** (0.6.0) folds into a closed "Sender's footer" section: the unsubscribe
+links, the privacy policy, "you are receiving this because", the app-store badges. Conservatively:
+only at the end of the mail, only when it has a link, with at least a line of real text before it,
+nothing long after it, no quoted history after it, and never through the middle of a data table, a
+list or a link. Anything else stays as written.
+
+**Pictures**: the page itself never loads anything from the web. A remote picture (an `<img>` with
+an http address: often a tracking pixel that tells the sender you read the mail) is loaded only as
+"Remote images" below allows; until then it is a dashed placeholder with its alt text (the mail
+layout) or a muted "[image: alt]" label (older apps), never a link. Logos, avatars and tiny pictures
+are hidden until the pictures load, and pictures of 3 pixels or less (trackers) are dropped. Pictures inside the mail (`cid:`
 parts) and attached pictures are downloaded by the plugin from Gmail, inline ones first, then the
 newest, within these limits:
 
@@ -226,6 +262,40 @@ newest, within these limits:
 Other attachments are listed by name and size (no download in this version; open the mail in
 Gmail for them). The page is at most 2 MB of HTML: when a long thread does not fit, the oldest
 messages give way, with a line saying how many.
+
+## Remote images
+
+A picture a mail loads from the web tells its sender that you opened the mail, when and from where
+(its address is often unique to you). So by default (Remote images: Ask) nothing is fetched: the
+mail says "N remote images are not shown (senders can track when you open mail)", with **Show
+images** (this mail, for the rest of the run) and **Always show from &lt;sender&gt;** (puts the
+address on the always-show list and shows this mail's pictures now). The pictures then fill their
+placeholders in the open mail.
+
+The plugin fetches the pictures itself, never the page, and hands them to the reviewer as it does
+the mail's own pictures. Every request:
+
+- is a plain GET of an `http(s)` address: no user name or password in the URL, no cookie (none is
+  kept or sent), no Referer, one fixed generic User-Agent (`Mozilla/5.0 (compatible)`);
+- goes only to public addresses: the host is resolved first and refused when any of its addresses
+  is loopback, private, link-local (the cloud metadata address among them), CGNAT, multicast or
+  reserved, IPv4 and IPv6 alike (an IPv4 address inside IPv6, IPv4-mapped, NAT64 or 6to4, is
+  checked as that IPv4 address); the connection then goes to the address that was checked, so a
+  name that answers differently a moment later cannot reach another one;
+- follows at most 3 redirects, each checked the same way;
+- takes PNG, JPEG, GIF and WebP only, by the Content-Type and by the bytes; SVG is refused;
+- is capped: 700 KiB a picture, 5.5 MiB and 30 pictures a mail (within what the mail's own pictures
+  and a Jira issue leave of the reviewer's budget), 10 s a picture and 15 s for all of them. The
+  content goes first, logos and avatars last.
+
+**Image proxy**: with a template set, the pictures are requested from your proxy instead, so the
+sender sees the proxy. The proxy's own host (the template's scheme, host and port) is exempt from
+the public-address rule, since you chose it and it often runs on your own network. The picture's
+address is still checked, but without resolving it (an IP literal must be public, `localhost`,
+`.local`, `.internal` and single-label names are refused): resolving it here would tell the
+sender's DNS that you opened the mail, which the proxy is there to avoid. Redirects the proxy
+answers are checked like any request. An invalid template is shown as a problem in the panel, and
+then no picture is loaded at all rather than fetched directly.
 
 ## Jira mail
 
@@ -260,6 +330,11 @@ talks to Jira itself, and nothing needs setting up in the Gmail plugin.
   The pictures are one budget in the reviewer either way (the issue: 7 pictures, the mail: 8).
   When the issue cannot be shown (Jira unreachable, slow past 15 s, busy), the mail shows alone
   with a short note.
+- **The issue card** (0.6.0, the mail layout): under the subject, a card with a JIRA badge, the
+  issue's key and summary, and a status line: the move the newest Jira mail states ("Backlog →
+  Ready to Test", with "now …" when Jira's status has moved on since), else the status, type and
+  assignee from the Jira plugin. When the Jira plugin does not answer, the card comes from the mail
+  alone (its subject and its words). **Open in Jira** opens the issue in your browser.
 
 ## Inbox
 
@@ -341,6 +416,11 @@ ccc gmail help
   downloaded, in its project data folder, both bounded; nothing else of your mailbox is stored.
 - The pictures of an opened thread go into the reviewer overlay (or the plugin's page) on your
   machine; Discuss and New session send the text, not the pictures.
+- Remote pictures are fetched only as "Remote images" allows (by default: when you press Show
+  images, or for a sender you put on the list); then the sender's server, or your image proxy,
+  learns that the mail was opened. They are not cached: each open fetches them again. The
+  always-show list is kept in the plugin's app storage on this machine. Logs name a refused
+  picture's host, never its address (which can carry a tracking token).
 
 ## Development
 
